@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { tools, callTool, loadRegistry, splitCommandLine } from '../mcp/code-intel-server/core.js';
+import { tools, callTool, splitCommandLine } from '../mcp/code-intel-server/core.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const EXPECTED_TOOLS = ['capability_discover','ast_grep_search','ast_grep_replace_preview','lsp_diagnostics','lsp_symbols','lsp_goto_definition','lsp_find_references','lsp_prepare_rename','lsp_rename_preview'];
@@ -17,6 +17,58 @@ function readJson(rel) { return JSON.parse(fs.readFileSync(path.join(ROOT, rel),
 function run(cmd, args, opts = {}) { return spawnSync(cmd, args, { cwd: ROOT, encoding: 'utf8', timeout: 15000, maxBuffer: 10 * 1024 * 1024, ...opts }); }
 function rel(file) { return path.relative(ROOT, file); }
 function writeJson(file, value) { fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n'); }
+function validateSettingsAgainstSchema(settings, schema) {
+  const errors = [];
+  function typeOf(value) {
+    if (Array.isArray(value)) return 'array';
+    if (value === null) return 'null';
+    return typeof value;
+  }
+  function typeMatches(value, expected) {
+    const actual = typeOf(value);
+    return Array.isArray(expected) ? expected.includes(actual) : actual === expected;
+  }
+  function visit(value, node, label) {
+    if (!node || typeof node !== 'object') return;
+    if (node.type && !typeMatches(value, node.type)) {
+      errors.push(`${label} expected ${Array.isArray(node.type) ? node.type.join(' or ') : node.type} but got ${typeOf(value)}`);
+      return;
+    }
+    if (Object.prototype.hasOwnProperty.call(node, 'const') && value !== node.const) {
+      errors.push(`${label} expected const ${JSON.stringify(node.const)}`);
+    }
+    if (node.not?.const !== undefined && value === node.not.const) {
+      errors.push(`${label} must not be ${JSON.stringify(node.not.const)}`);
+    }
+    if (typeof value === 'string') {
+      if (node.minLength !== undefined && value.length < node.minLength) errors.push(`${label} shorter than minLength ${node.minLength}`);
+      if (node.pattern && !(new RegExp(node.pattern).test(value))) errors.push(`${label} does not match pattern ${node.pattern}`);
+    }
+    if (Array.isArray(value)) {
+      if (node.minItems !== undefined && value.length < node.minItems) errors.push(`${label} shorter than minItems ${node.minItems}`);
+      if (node.items) value.forEach((item, index) => visit(item, node.items, `${label}[${index}]`));
+    }
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const properties = node.properties || {};
+      if (node.required) {
+        for (const key of node.required) {
+          if (!Object.prototype.hasOwnProperty.call(value, key)) errors.push(`${label}.${key} is required`);
+        }
+      }
+      for (const [key, child] of Object.entries(properties)) {
+        if (Object.prototype.hasOwnProperty.call(value, key)) visit(value[key], child, `${label}.${key}`);
+      }
+      const extraKeys = Object.keys(value).filter((key) => !Object.prototype.hasOwnProperty.call(properties, key));
+      if (node.additionalProperties === false) {
+        for (const key of extraKeys) errors.push(`${label}.${key} is not allowed`);
+      } else if (node.additionalProperties && typeof node.additionalProperties === 'object') {
+        for (const key of extraKeys) visit(value[key], node.additionalProperties, `${label}.${key}`);
+      }
+    }
+  }
+  visit(settings, schema, '$');
+  if (errors.length) throw new Error(`settings schema validation failed: ${errors.slice(0, 8).join('; ')}`);
+}
 function validateSkillFrontmatter(relPath) {
   const body = fs.readFileSync(path.join(ROOT, relPath), 'utf8');
   const lines = body.split(/\r?\n/);
@@ -95,33 +147,20 @@ for (const skill of SKILLS) {
   check(`skill ${skill} frontmatter parseable`, !error, error || relPath);
 }
 for (const ref of REFS) check(`reference ${ref} exists`, exists(`references/${ref}`), `references/${ref}`);
-check('adapter schema exists', exists('adapters/schema.json'), 'adapters/schema.json');
-check('adapter registry exists', exists('adapters/registry.json'), 'adapters/registry.json');
-let registry;
+check('settings schema exists', exists('settings/schema.json'), 'settings/schema.json');
+check('default settings exists', exists('settings/defaults.json'), 'settings/defaults.json');
+let defaultSettings;
 try {
-  registry = loadRegistry();
+  defaultSettings = readJson('settings/defaults.json');
+  validateSettingsAgainstSchema(defaultSettings, readJson('settings/schema.json'));
+  check('default settings validate against settings/schema.json', true, 'settings/defaults.json');
 } catch (error) {
-  check('registry validates against adapters/schema.json', false, error.message);
+  check('default settings validate against settings/schema.json', false, error.message);
   finish();
 }
-check('registry has version and adapters', Boolean(registry.version && Array.isArray(registry.adapters) && registry.adapters.length), registry.version);
-check('registry validates against adapters/schema.json', true, 'loadRegistry completed schema-backed validation');
-for (const adapter of registry.adapters) {
-  check(`adapter ${adapter.language} shape`, Boolean(adapter.language && adapter.extensions?.length && adapter.astGrep?.languageId && adapter.lsp && adapter.fallback?.length && adapter.fixtures), JSON.stringify(adapter));
-}
-if (!process.env.CODE_INTEL_EXPECT_VALIDATION_FAILURE) {
-  const malformedRegistryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-bad-registry-'));
-  try {
-    writeJson(path.join(malformedRegistryRoot, 'bad-registry.json'), { version: 'bad', adapters: [{ language: 'bad' }] });
-    const badRegistryRun = run('node', ['scripts/validate-plugin.js', '--json'], {
-      env: { ...process.env, CODE_INTEL_REGISTRY_PATH: path.join(malformedRegistryRoot, 'bad-registry.json'), CODE_INTEL_EXPECT_VALIDATION_FAILURE: '1' }
-    });
-    const badRegistryEvidence = `${badRegistryRun.stdout}\n${badRegistryRun.stderr}`;
-    check('registry schema validation rejects malformed registry', badRegistryRun.status !== 0 && badRegistryEvidence.includes('schema'), badRegistryEvidence.slice(0, 500));
-  } finally {
-    fs.rmSync(malformedRegistryRoot, { recursive: true, force: true });
-  }
-}
+check('default settings include python language', Boolean(defaultSettings.languages?.python?.lsp?.commands?.length), JSON.stringify(defaultSettings.languages?.python || {}));
+check('default settings include typescript language', Boolean(defaultSettings.languages?.typescript?.lsp?.commands?.length), JSON.stringify(defaultSettings.languages?.typescript || {}));
+check('default settings command policy uses ast-grep', defaultSettings.astGrep?.command === 'ast-grep', defaultSettings.astGrep?.command);
 check('scripts executable or documented', ['scripts/init-code-intel.js','scripts/doctor-code-intel.js','scripts/validate-plugin.js'].every((f) => fs.statSync(path.join(ROOT, f)).mode & 0o111), 'init/doctor/validate executable');
 
 // MCP contract validation
@@ -524,7 +563,7 @@ for (const [name, expectation] of behavior) check(`behavior documented: ${name}`
 
 // No forbidden command path in executable/config surfaces.
 const scanFiles = [];
-for (const dir of ['scripts','hooks','adapters','mcp']) {
+for (const dir of ['scripts','hooks','adapters','mcp','settings']) {
   const stack = [path.join(ROOT, dir)];
   while (stack.length) {
     const item = stack.pop();

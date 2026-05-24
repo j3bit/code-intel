@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "path": {
+    "extraDirs": []
+  },
+  "astGrep": {
+    "command": "ast-grep",
+    "configPath": null
+  },
+  "fallback": ["rg", "grep"],
+  "languages": {
+    "typescript": {
+      "extensions": [".ts", ".tsx"],
+      "astGrep": { "languageId": "typescript" },
+      "lsp": {
+        "commands": ["typescript-language-server --stdio"],
+        "capabilities": ["definition", "references", "rename", "diagnostics", "symbols"]
+      }
+    },
+    "javascript": {
+      "extensions": [".js", ".jsx", ".mjs", ".cjs"],
+      "astGrep": { "languageId": "javascript" },
+      "lsp": {
+        "commands": ["typescript-language-server --stdio"],
+        "capabilities": ["definition", "references", "rename", "diagnostics", "symbols"]
+      }
+    },
+    "python": {
+      "extensions": [".py"],
+      "astGrep": { "languageId": "python" },
+      "lsp": {
+        "commands": ["pyright-langserver --stdio", "pylsp"],
+        "capabilities": ["definition", "references", "rename", "diagnostics", "symbols"]
+      }
+    },
+    "json": {
+      "extensions": [".json"],
+      "astGrep": { "languageId": "json" },
+      "lsp": {
+        "commands": [],
+        "capabilities": []
+      }
+    }
+  }
+}
