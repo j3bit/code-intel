@@ -578,6 +578,33 @@ try {
 } finally {
   fs.rmSync(initTmpRoot, { recursive: true, force: true });
 }
+const freshDoctorTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-fresh-doctor-'));
+try {
+  fs.cpSync(path.join(ROOT, 'fixtures/repos/typescript-basic'), freshDoctorTmpRoot, { recursive: true });
+  const initRun = run('node', ['scripts/init-code-intel.js', '--repo', freshDoctorTmpRoot, '--json']);
+  const doctorRun = run('node', ['scripts/doctor-code-intel.js', '--repo', freshDoctorTmpRoot, '--json']);
+  const doctor = JSON.parse(doctorRun.stdout || '{}');
+  const reasons = (doctor.findings || []).map((finding) => finding.reason);
+  check('fresh init then doctor does not report generated report inventory mismatch', initRun.status === 0 && doctorRun.status === 0 && !reasons.includes('language inventory major mismatch'), reasons.join(' | '));
+
+  const profilePath = path.join(freshDoctorTmpRoot, 'docs/code-intel/routing-profile.json');
+  const profile = JSON.parse(fs.readFileSync(profilePath, 'utf8'));
+  profile.settingsSources = { project: profile.settingsSources.project, user: profile.settingsSources.user, default: profile.settingsSources.default };
+  writeJson(profilePath, profile);
+  const reorderedRun = run('node', ['scripts/doctor-code-intel.js', '--repo', freshDoctorTmpRoot, '--json']);
+  const reorderedDoctor = JSON.parse(reorderedRun.stdout || '{}');
+  const reorderedReasons = (reorderedDoctor.findings || []).map((finding) => finding.reason);
+  check('doctor treats reordered settings sources as equivalent', reorderedRun.status === 0 && !reorderedReasons.includes('settings source differs'), reorderedReasons.join(' | '));
+
+  profile.settingsSources = { ...profile.settingsSources, default: 'stale-settings-source' };
+  writeJson(profilePath, profile);
+  const changedRun = run('node', ['scripts/doctor-code-intel.js', '--repo', freshDoctorTmpRoot, '--json']);
+  const changedDoctor = JSON.parse(changedRun.stdout || '{}');
+  const changedReasons = (changedDoctor.findings || []).map((finding) => finding.reason);
+  check('doctor detects changed settings source', changedRun.status === 0 && changedReasons.includes('settings source differs'), changedReasons.join(' | '));
+} finally {
+  fs.rmSync(freshDoctorTmpRoot, { recursive: true, force: true });
+}
 const staleTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-stale-profile-'));
 try {
   fs.cpSync(path.join(ROOT, 'fixtures/repos/typescript-basic'), staleTmpRoot, { recursive: true });
@@ -596,7 +623,7 @@ try {
   const doctorRun = run('node', ['scripts/doctor-code-intel.js', '--repo', staleTmpRoot, '--json']);
   const doctor = JSON.parse(doctorRun.stdout || '{}');
   const reasons = (doctor.findings || []).map((finding) => finding.reason).join(' | ');
-  check('doctor detects stale routing profile version and inventory mismatch', reasons.includes('plugin version differs') && reasons.includes('settings version differs') && reasons.includes('language inventory major mismatch'), reasons);
+  check('doctor detects stale routing profile version and inventory mismatch', reasons.includes('plugin version differs') && reasons.includes('settings version differs') && reasons.includes('settings source differs') && reasons.includes('language inventory major mismatch'), reasons);
   fs.writeFileSync(path.join(staleDocs, 'routing-profile.json'), '{bad json');
   const corruptDoctorRun = run('node', ['scripts/doctor-code-intel.js', '--repo', staleTmpRoot, '--json']);
   const corruptDoctor = JSON.parse(corruptDoctorRun.stdout || '{}');

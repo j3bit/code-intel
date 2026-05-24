@@ -16,6 +16,29 @@ function parseArgs(argv) {
 function ensureDir(dir) { fs.mkdirSync(dir, { recursive: true }); }
 function writeJson(file, value) { fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n'); }
 
+function decrementInventoryLanguage(inventory, language) {
+  const current = inventory.languages?.[language]?.files || 0;
+  if (!current) return;
+  inventory.languages[language] = { ...inventory.languages[language], files: current - 1 };
+  if (inventory.languages[language].files <= 0) delete inventory.languages[language];
+}
+
+function comparableInventory(repoRoot, inventory) {
+  const comparable = JSON.parse(JSON.stringify(inventory || {}));
+  comparable.languages ||= {};
+  const reports = [
+    { file: 'routing-profile.json', language: 'json' },
+    { file: 'capability-report.md' },
+    { file: 'validation-report.md' }
+  ];
+  for (const report of reports) {
+    if (!fs.existsSync(path.join(repoRoot, 'docs', 'code-intel', report.file))) continue;
+    comparable.totalFiles = Math.max(0, (comparable.totalFiles || 0) - 1);
+    if (report.language) decrementInventoryLanguage(comparable, report.language);
+  }
+  return comparable;
+}
+
 function astGrepSmoke(repoRoot, language, info, discovery) {
   if (info.astGrep !== 'available') return { status: 'skipped', reason: 'ast-grep unavailable or language unsupported' };
   const example = discovery.inventory.languages[language]?.examples?.[0];
@@ -83,7 +106,7 @@ const profile = {
   settingsSources: discovery.settingsSources,
   tools: discovery.tools,
   languages: Object.fromEntries(Object.entries(discovery.languages).filter(([, v]) => v.presentFiles > 0).map(([k, v]) => [k, { astGrep: v.astGrep, astGrepLanguageId: v.astGrepLanguageId, astGrepSmoke: v.astGrepSmoke, lsp: v.lsp, lspState: v.lspState, lspCommand: v.lspCommand, lspInitializeSmoke: v.lspInitializeSmoke, methodVerified: v.lspInitializeSmoke?.status === 'passed' ? ['documentSymbol'] : [], fallback: v.fallback, files: v.presentFiles }])),
-  inventory: discovery.inventory,
+  inventory: comparableInventory(repoRoot, discovery.inventory),
   staleRules: ['repo root differs', 'settings version differs', 'settings source differs', 'plugin version differs', 'profile timestamp predates material plugin upgrade', 'language inventory major mismatch'],
   commandPolicy: 'this plugin does not call sg'
 };
