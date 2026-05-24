@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This repository is the standalone `code-intel` Codex plugin. Core MCP logic lives in `mcp/code-intel-server/`, with the executable entrypoint in `index.js` and shared implementation in `core.js`. User-facing CLI workflows are in `scripts/` (`init`, `doctor`, `validate`). Codex skill instructions live under `skills/*/SKILL.md`; optional soft hooks live in `hooks/` with `hooks/hooks.json` as the manifest. Language capability data is in `adapters/`, policy contracts are in `references/`, and the maintained project direction lives in `docs/project-direction.md`. Historical design notes may be kept only as local ignored archives. Test fixtures are under `fixtures/repos/`, with fake LSP servers in `fixtures/lsp/`.
+This repository is the standalone `code-intel` Codex plugin. Core MCP logic lives in `mcp/code-intel-server/`, with the executable entrypoint in `index.js` and shared implementation in `core.js`. User-facing CLI workflows are in `scripts/` (`init`, `doctor`, `validate`). Codex skill instructions live under `skills/*/SKILL.md`; optional soft hooks live in `hooks/` with `hooks/hooks.json` as the manifest. Language capability/settings data is in `settings/` (`settings/defaults.json` and `settings/schema.json`), policy contracts are in `references/`, and the maintained project direction lives in `docs/project-direction.md`. Historical design notes may be kept only as local ignored archives. Test fixtures are under `fixtures/repos/`, with fake LSP servers in `fixtures/lsp/`.
 
 ## Build, Test, and Development Commands
 
