@@ -807,4 +807,31 @@ const commandCallPattern = /(?:spawnSync|spawn|execFile|exec)\s*\(\s*['"]sg['"]|
 const offenders = scanFiles.filter((file) => commandCallPattern.test(fs.readFileSync(file, 'utf8'))).map(rel);
 check('no script hook settings or MCP path calls forbidden shorthand command', offenders.length === 0, offenders.join(', ') || 'none');
 
+const retiredTerms = [
+  ['ad', 'apter'].join(''),
+  ['reg', 'istry'].join(''),
+  'CODE_INTEL_' + ['REG', 'ISTRY'].join('') + '_PATH',
+  ['ad', 'apters/'].join('')
+];
+const activeSurfaceFiles = [
+  'AGENTS.md',
+  'README.md',
+  '.codex-plugin/plugin.json',
+  'docs/project-direction.md',
+  'package.json',
+  ...SKILLS.map((skill) => `skills/${skill}/SKILL.md`),
+  ...REFS.map((ref) => `references/${ref}`),
+  ...scanFiles.map(rel)
+];
+const retiredHits = [];
+for (const file of activeSurfaceFiles) {
+  const full = path.join(ROOT, file);
+  if (!fs.existsSync(full)) continue;
+  const text = fs.readFileSync(full, 'utf8');
+  for (const term of retiredTerms) {
+    if (text.includes(term)) retiredHits.push(`${file}:${term}`);
+  }
+}
+check('active surfaces omit retired settings-era terms', retiredHits.length === 0, retiredHits.join(', ') || 'none');
+
 finish();
