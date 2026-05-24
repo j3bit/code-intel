@@ -43,14 +43,19 @@ function astGrepSmoke(repoRoot, language, info, discovery) {
   if (info.astGrep !== 'available') return { status: 'skipped', reason: 'ast-grep unavailable or language unsupported' };
   const example = discovery.inventory.languages[language]?.examples?.[0];
   if (!example) return { status: 'skipped', reason: 'no sample file detected for language' };
-  const result = spawnSync('ast-grep', ['--lang', info.astGrepLanguageId, '--pattern', '$A', '--json', path.join(repoRoot, example)], {
+  const executable = discovery.tools.astGrep.resolvedCommand || discovery.tools.astGrep.command;
+  const cmdArgs = [];
+  if (discovery.tools.astGrep.configPath) cmdArgs.push('--config', discovery.tools.astGrep.configPath);
+  cmdArgs.push('--lang', info.astGrepLanguageId, '--pattern', '$A', '--json', path.join(repoRoot, example));
+  const result = spawnSync(executable, cmdArgs, {
     cwd: repoRoot,
     encoding: 'utf8',
     timeout: 5000,
     maxBuffer: 1024 * 1024
   });
-  if (result.status === 0 || result.stdout) return { status: 'passed', file: example, languageId: info.astGrepLanguageId };
-  return { status: 'failed', file: example, languageId: info.astGrepLanguageId, stderrSummary: (result.stderr || result.error?.message || '').trim().slice(0, 300) };
+  const base = { file: example, languageId: info.astGrepLanguageId, executable: discovery.tools.astGrep.command, resolvedCommand: discovery.tools.astGrep.resolvedCommand || null, configPath: discovery.tools.astGrep.configPath || null };
+  if (result.status === 0 || result.stdout) return { status: 'passed', ...base };
+  return { status: 'failed', ...base, stderrSummary: (result.stderr || result.error?.message || '').trim().slice(0, 300) };
 }
 
 function lspInitializeSmoke(repoRoot, language, info, discovery) {

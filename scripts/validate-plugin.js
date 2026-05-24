@@ -70,6 +70,10 @@ function framedEvidence(result) {
 function mcpManifestServer() {
   return readJson('.mcp.json').mcpServers?.['code-intel'];
 }
+function resolvedManifestCwd(server, manifestDir = ROOT) {
+  if (!server?.cwd) return manifestDir;
+  return path.isAbsolute(server.cwd) ? server.cwd : path.resolve(manifestDir, server.cwd);
+}
 function finish() {
   const failed = results.filter((r) => !r.ok);
   const report = { status: failed.length ? 'failed' : 'passed', total: results.length, passed: results.length - failed.length, failed: failed.length, results };
@@ -224,14 +228,17 @@ check('MCP framed initialize works', framedInitializeOk(framedInit), framedEvide
 const mcpServer = mcpManifestServer();
 check('MCP manifest declares code-intel server', Boolean(mcpServer?.command && Array.isArray(mcpServer.args)), JSON.stringify(mcpServer || {}));
 if (mcpServer?.command && Array.isArray(mcpServer.args)) {
+  const manifestText = JSON.stringify(mcpServer);
+  check('MCP manifest avoids checkout-specific absolute paths', !manifestText.includes('/Dev/codex-plugins/code-intel/'), manifestText);
+  check('MCP manifest uses plugin-relative cwd', mcpServer.cwd === '.', JSON.stringify(mcpServer));
   const manifestInit = spawnSync(mcpServer.command, mcpServer.args, {
-    cwd: os.tmpdir(),
+    cwd: resolvedManifestCwd(mcpServer),
     input: initializeFrame(),
     encoding: 'utf8',
     timeout: 5000,
     maxBuffer: 10 * 1024 * 1024
   });
-  check('MCP manifest starts from outside repository cwd', framedInitializeOk(manifestInit), framedEvidence(manifestInit));
+  check('MCP manifest starts with plugin-relative cwd', framedInitializeOk(manifestInit), framedEvidence(manifestInit));
 }
 const unsupportedFramedInit = run(process.execPath, ['mcp/code-intel-server/index.js'], { input: unsupportedInitializeFrame() });
 check(
@@ -638,6 +645,49 @@ try {
   }
 } finally {
   fs.rmSync(initTmpRoot, { recursive: true, force: true });
+}
+const initAstSettingsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-init-ast-settings-'));
+try {
+  const emptyPathDir = path.join(initAstSettingsRoot, 'empty-path');
+  const extraAstDir = path.join(initAstSettingsRoot, 'extra-bin');
+  const repoRoot = path.join(initAstSettingsRoot, 'repo');
+  const projectSettingsDir = path.join(repoRoot, '.code-intel');
+  fs.mkdirSync(emptyPathDir, { recursive: true });
+  fs.mkdirSync(extraAstDir, { recursive: true });
+  fs.mkdirSync(projectSettingsDir, { recursive: true });
+  fs.cpSync(path.join(ROOT, 'fixtures/repos/python-basic'), repoRoot, { recursive: true });
+  const fakeAstGrep = path.join(extraAstDir, 'ast-grep');
+  fs.writeFileSync(fakeAstGrep, `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--version" ]; then
+    echo "ast-grep fake-init-extra-dir"
+    exit 0
+  fi
+done
+printf '%s\n' '[{"file":"example.py","text":"fake init smoke","language":"Python"}]'
+`);
+  fs.chmodSync(fakeAstGrep, 0o755);
+  writeJson(path.join(projectSettingsDir, 'settings.json'), {
+    version: 1,
+    path: { extraDirs: [extraAstDir] },
+    astGrep: { command: 'ast-grep' }
+  });
+  const initRun = run(process.execPath, ['scripts/init-code-intel.js', '--repo', repoRoot, '--json'], {
+    env: { ...process.env, PATH: emptyPathDir }
+  });
+  const profile = JSON.parse(fs.readFileSync(path.join(repoRoot, 'docs/code-intel/routing-profile.json'), 'utf8'));
+  check(
+    'init ast-grep smoke uses effective settings command path',
+    initRun.status === 0 &&
+      profile.tools?.astGrep?.resolvedCommand === fakeAstGrep &&
+      profile.languages?.python?.astGrepSmoke?.status === 'passed' &&
+      profile.languages.python.astGrepSmoke.resolvedCommand === fakeAstGrep,
+    initRun.stderr || JSON.stringify(profile.languages?.python?.astGrepSmoke || {})
+  );
+} catch (error) {
+  check('init ast-grep smoke uses effective settings command path', false, error.message);
+} finally {
+  fs.rmSync(initAstSettingsRoot, { recursive: true, force: true });
 }
 const freshDoctorTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-fresh-doctor-'));
 try {
