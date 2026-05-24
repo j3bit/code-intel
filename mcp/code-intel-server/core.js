@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -7,7 +8,6 @@ const PLUGIN_VERSION = '0.1.0';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const DEFAULT_SETTINGS_PATH = path.join(ROOT, 'settings', 'defaults.json');
 const SETTINGS_SCHEMA_PATH = path.join(ROOT, 'settings', 'schema.json');
-const USER_SETTINGS_PATH = path.join(process.env.HOME || '', '.codex', 'code-intel', 'settings.json');
 const TOOL_NAMES = [
   'capability_discover',
   'ast_grep_search',
@@ -35,10 +35,19 @@ function typeMatches(value, expected) {
   return Array.isArray(expected) ? expected.includes(actual) : actual === expected;
 }
 
+function resolveHomeDir() {
+  return process.env.HOME || process.env.USERPROFILE || os.homedir();
+}
+
+function defaultUserSettingsPath() {
+  return path.join(resolveHomeDir(), '.codex', 'code-intel', 'settings.json');
+}
+
 function expandHome(value) {
   if (typeof value !== 'string') return value;
-  if (value === '~') return process.env.HOME || value;
-  if (value.startsWith('~/')) return path.join(process.env.HOME || '', value.slice(2));
+  const homeDir = resolveHomeDir();
+  if (value === '~') return homeDir || value;
+  if (value.startsWith('~/')) return homeDir ? path.join(homeDir, value.slice(2)) : value;
   return value;
 }
 
@@ -158,7 +167,7 @@ export function validateSettings(settings) {
 
 export function loadSettings(repoRoot = process.cwd(), opts = {}) {
   const defaultPath = opts.defaultSettingsPath || process.env.CODE_INTEL_DEFAULT_SETTINGS_PATH || DEFAULT_SETTINGS_PATH;
-  const userPath = opts.userSettingsPath || process.env.CODE_INTEL_USER_SETTINGS_PATH || USER_SETTINGS_PATH;
+  const userPath = opts.userSettingsPath || process.env.CODE_INTEL_USER_SETTINGS_PATH || defaultUserSettingsPath();
   const projectPath = opts.projectSettingsPath || process.env.CODE_INTEL_PROJECT_SETTINGS_PATH || path.join(path.resolve(repoRoot), '.code-intel', 'settings.json');
   const defaults = readJson(defaultPath);
   const expandedUserPath = expandHome(userPath);

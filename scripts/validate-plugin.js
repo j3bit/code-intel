@@ -191,6 +191,7 @@ if (!process.env.CODE_INTEL_EXPECT_VALIDATION_FAILURE) {
 }
 const settingsExpansionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-settings-expansion-'));
 const originalHome = process.env.HOME;
+const originalUserProfile = process.env.USERPROFILE;
 try {
   const fakeHome = path.join(settingsExpansionRoot, 'home');
   const userSettingsPath = path.join(settingsExpansionRoot, 'user-settings.json');
@@ -216,7 +217,64 @@ try {
 } finally {
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
+  if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = originalUserProfile;
   fs.rmSync(settingsExpansionRoot, { recursive: true, force: true });
+}
+const settingsHomeFallbackRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-settings-home-fallback-'));
+try {
+  const fakeUserProfile = path.join(settingsHomeFallbackRoot, 'profile');
+  const maliciousCwd = path.join(settingsHomeFallbackRoot, 'cwd');
+  const projectRoot = path.join(settingsHomeFallbackRoot, 'repo');
+  const profileSettingsPath = path.join(fakeUserProfile, '.codex', 'code-intel', 'settings.json');
+  const cwdSettingsPath = path.join(maliciousCwd, '.codex', 'code-intel', 'settings.json');
+  const childScriptPath = path.join(settingsHomeFallbackRoot, 'check-home-fallback.mjs');
+  fs.mkdirSync(path.dirname(profileSettingsPath), { recursive: true });
+  fs.mkdirSync(path.dirname(cwdSettingsPath), { recursive: true });
+  fs.mkdirSync(projectRoot, { recursive: true });
+  writeJson(profileSettingsPath, {
+    version: 1,
+    path: { extraDirs: ['~/code-intel-bin'] },
+    astGrep: { command: 'profile-ast-grep' }
+  });
+  writeJson(cwdSettingsPath, {
+    version: 1,
+    astGrep: { command: 'cwd-relative-ast-grep' }
+  });
+  fs.writeFileSync(childScriptPath, [
+    `import { loadSettings } from ${JSON.stringify(pathToFileURL(path.join(ROOT, 'mcp/code-intel-server/core.js')).href)};`,
+    'const settings = loadSettings(process.argv[2]);',
+    'console.log(JSON.stringify({ command: settings.astGrep.command, extraDir: settings.path.extraDirs[0], sources: settings.sources }));'
+  ].join('\n'));
+  const childEnv = { ...process.env, USERPROFILE: fakeUserProfile };
+  delete childEnv.HOME;
+  delete childEnv.CODE_INTEL_DEFAULT_SETTINGS_PATH;
+  delete childEnv.CODE_INTEL_USER_SETTINGS_PATH;
+  delete childEnv.CODE_INTEL_PROJECT_SETTINGS_PATH;
+  const fallbackRun = run('node', [childScriptPath, projectRoot], { cwd: maliciousCwd, env: childEnv });
+  let fallbackOutput = null;
+  try {
+    fallbackOutput = JSON.parse(fallbackRun.stdout || '{}');
+  } catch {
+    fallbackOutput = null;
+  }
+  check(
+    'settings uses USERPROFILE for default user settings when HOME is unset',
+    fallbackRun.status === 0 && fallbackOutput?.command === 'profile-ast-grep',
+    fallbackRun.stderr || fallbackRun.stdout
+  );
+  check(
+    'settings does not read cwd-relative .codex as user settings when HOME is unset',
+    fallbackRun.status === 0 && fallbackOutput?.sources?.user === profileSettingsPath,
+    JSON.stringify(fallbackOutput)
+  );
+  check(
+    'settings expands home with USERPROFILE when HOME is unset',
+    fallbackRun.status === 0 && fallbackOutput?.extraDir === path.join(fakeUserProfile, 'code-intel-bin'),
+    JSON.stringify(fallbackOutput)
+  );
+} finally {
+  fs.rmSync(settingsHomeFallbackRoot, { recursive: true, force: true });
 }
 check('scripts executable or documented', ['scripts/init-code-intel.js','scripts/doctor-code-intel.js','scripts/validate-plugin.js'].every((f) => fs.statSync(path.join(ROOT, f)).mode & 0o111), 'init/doctor/validate executable');
 
