@@ -177,20 +177,6 @@ export function loadSettings(repoRoot = process.cwd(), opts = {}) {
   return merged;
 }
 
-export function validateRegistry(registry) {
-  const schema = readJson(path.join(ROOT, 'adapters', 'schema.json'));
-  const errors = validateAgainstSchema(registry, schema, '$');
-  if (errors.length) {
-    const error = new Error(`adapter registry schema validation failed: ${errors.slice(0, 8).join('; ')}`);
-    error.validationErrors = errors;
-    throw error;
-  }
-  return registry;
-}
-
-export function loadRegistry() {
-  return validateRegistry(readJson(process.env.CODE_INTEL_REGISTRY_PATH || path.join(ROOT, 'adapters', 'registry.json')));
-}
 
 export function detectExecutable(command, args = ['--version']) {
   const result = spawnSync(command, args, { encoding: 'utf8', timeout: 3000 });
@@ -366,14 +352,6 @@ export function languageConfigForLanguage(language, settings = loadSettings()) {
   return found ? { language: found[0], config: found[1] } : { language: null, config: null };
 }
 
-export function adapterForFile(file, registry = loadRegistry()) {
-  const ext = path.extname(file).toLowerCase();
-  return registry.adapters.find((adapter) => adapter.extensions.includes(ext));
-}
-
-export function adapterForLanguage(language, registry = loadRegistry()) {
-  return registry.adapters.find((adapter) => adapter.language === language || adapter.astGrep.languageId === language);
-}
 
 export function languageInventory(repoRoot, settings = loadSettings(repoRoot)) {
   const files = walkFiles(repoRoot);
@@ -712,13 +690,13 @@ function lspParams(method, uri, args = {}) {
   }
 }
 
-export async function runLspRequestAsync(commandLine, adapter, method, args = {}) {
+export async function runLspRequestAsync(commandLine, languageRuntime, method, args = {}) {
   const resolved = resolveRepoRelativeFile(args.repoRoot || process.cwd(), args.file);
-  if (!resolved.ok) return lspUnavailable(method, { ...args, language: adapter.language }, resolved.reason);
+  if (!resolved.ok) return lspUnavailable(method, { ...args, language: languageRuntime.language }, resolved.reason);
   const { repoRoot, filePath } = resolved;
-  if (!fs.existsSync(filePath)) return lspUnavailable(method, { ...args, language: adapter.language }, `file not found: ${args.file}`);
+  if (!fs.existsSync(filePath)) return lspUnavailable(method, { ...args, language: languageRuntime.language }, `file not found: ${args.file}`);
   const commandParts = splitCommandLine(commandLine);
-  if (!commandParts.length) return lspUnavailable(method, { ...args, language: adapter.language }, 'LSP command candidate is empty');
+  if (!commandParts.length) return lspUnavailable(method, { ...args, language: languageRuntime.language }, 'LSP command candidate is empty');
 
   const uri = pathToFileURL(filePath).href;
   const text = fs.readFileSync(filePath, 'utf8');
@@ -754,7 +732,7 @@ export async function runLspRequestAsync(commandLine, adapter, method, args = {}
     if (initialize?.error) throw Object.assign(new Error('LSP initialize failed'), { lspError: initialize.error });
 
     write({ jsonrpc: '2.0', method: 'initialized', params: {} });
-    write({ jsonrpc: '2.0', method: 'textDocument/didOpen', params: { textDocument: { uri, languageId: adapter.language, version: 1, text } } });
+    write({ jsonrpc: '2.0', method: 'textDocument/didOpen', params: { textDocument: { uri, languageId: languageRuntime.language, version: 1, text } } });
     write({ jsonrpc: '2.0', id: 2, method, params: lspParams(method, uri, args) });
     const response = await waitForLspMessage(state, (message) => message.id === 2, timeoutMs);
 
@@ -767,11 +745,11 @@ export async function runLspRequestAsync(commandLine, adapter, method, args = {}
       return {
         status: 'error',
         method,
-        language: adapter.language,
+        language: languageRuntime.language,
         command: commandLine,
         error: response.error,
         stderrSummary: state.stderr.toString('utf8').trim().slice(0, 1000),
-        fallbackUsed: runtimeFallbackUsed(adapter, args.settings || null, args.repoRoot || process.cwd()),
+        fallbackUsed: runtimeFallbackUsed(languageRuntime, args.settings || null, args.repoRoot || process.cwd()),
         fallbackReason: 'LSP server returned an error'
       };
     }
@@ -780,7 +758,7 @@ export async function runLspRequestAsync(commandLine, adapter, method, args = {}
       return {
         status: 'ok',
         method,
-        language: adapter.language,
+        language: languageRuntime.language,
         command: commandLine,
         serverInfo: initialize?.result?.serverInfo || null,
         lspState: 'methodVerified',
@@ -793,14 +771,14 @@ export async function runLspRequestAsync(commandLine, adapter, method, args = {}
         fallbackReason: null
       };
     }
-    return lspUnavailable(method, { ...args, language: adapter.language }, 'LSP server did not return a response for the requested method', {
+    return lspUnavailable(method, { ...args, language: languageRuntime.language }, 'LSP server did not return a response for the requested method', {
       command: commandLine,
       stderrSummary: state.stderr.toString('utf8').trim().slice(0, 1000),
       parsedMessages: state.messages.length
     });
   } catch (error) {
     child.kill();
-    return lspUnavailable(method, { ...args, language: adapter.language }, error.lspError ? 'LSP initialize failed' : 'LSP server did not return a response for the requested method', {
+    return lspUnavailable(method, { ...args, language: languageRuntime.language }, error.lspError ? 'LSP initialize failed' : 'LSP server did not return a response for the requested method', {
       command: commandLine,
       error: error.lspError || { message: error.message },
       stderrSummary: state.stderr.toString('utf8').trim().slice(0, 1000),
@@ -809,14 +787,14 @@ export async function runLspRequestAsync(commandLine, adapter, method, args = {}
   }
 }
 
-export function runLspRequest(commandLine, adapter, method, args = {}) {
+export function runLspRequest(commandLine, languageRuntime, method, args = {}) {
   const workerArgs = {
     ...args,
     repoRoot: args.repoRoot ? path.resolve(args.repoRoot) : undefined
   };
   const worker = spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--run-lsp-request-json'], {
     cwd: workerArgs.repoRoot || process.cwd(),
-    input: JSON.stringify({ commandLine, adapter, method, args: workerArgs }),
+    input: JSON.stringify({ commandLine, languageRuntime, method, args: workerArgs }),
     encoding: 'utf8',
     timeout: (workerArgs.timeoutMs || 10000) + 5000,
     maxBuffer: 10 * 1024 * 1024,
@@ -825,7 +803,7 @@ export function runLspRequest(commandLine, adapter, method, args = {}) {
   if (worker.status === 0 && worker.stdout) {
     try { return JSON.parse(worker.stdout); } catch {}
   }
-  return lspUnavailable(method, { ...args, language: adapter.language }, 'LSP server did not return a response for the requested method', {
+  return lspUnavailable(method, { ...args, language: languageRuntime.language }, 'LSP server did not return a response for the requested method', {
     command: commandLine,
     statusCode: worker.status,
     stderrSummary: (worker.stderr || worker.error?.message || '').trim().slice(0, 1000)
@@ -835,9 +813,9 @@ export function runLspRequest(commandLine, adapter, method, args = {}) {
 export function lspTool(method, args = {}) {
   const { language, config, command, settings } = findLspCommand(args);
   if (!config) return lspUnavailable(method, args, 'unsupported language or file extension', { settings });
-  const adapter = { language, ...config };
+  const languageRuntime = { language, ...config };
   if (!command) return lspUnavailable(method, { ...args, language }, 'LSP command missing', { settings });
-  return runLspRequest(command, adapter, method, { ...args, settings: { astGrep: settings.astGrep, path: settings.path }, settingsPathExtraDirs: settings.path.extraDirs });
+  return runLspRequest(command, languageRuntime, method, { ...args, settings: { astGrep: settings.astGrep, path: settings.path }, settingsPathExtraDirs: settings.path.extraDirs });
 }
 
 export function callTool(name, args = {}) {
@@ -890,8 +868,8 @@ export const tools = TOOL_NAMES.map((name) => {
 async function runLspWorkerCli() {
   let input = '';
   for await (const chunk of process.stdin) input += chunk;
-  const { commandLine, adapter, method, args } = JSON.parse(input || '{}');
-  const result = await runLspRequestAsync(commandLine, adapter, method, args || {});
+  const { commandLine, languageRuntime, method, args } = JSON.parse(input || '{}');
+  const result = await runLspRequestAsync(commandLine, languageRuntime, method, args || {});
   process.stdout.write(JSON.stringify(result));
 }
 

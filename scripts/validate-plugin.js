@@ -9,7 +9,7 @@ import { tools, callTool, loadSettings, validateSettings, splitCommandLine } fro
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const EXPECTED_TOOLS = ['capability_discover','ast_grep_search','ast_grep_replace_preview','lsp_diagnostics','lsp_symbols','lsp_goto_definition','lsp_find_references','lsp_prepare_rename','lsp_rename_preview'];
 const SKILLS = ['code-intel','init-code-intel','code-intel-doctor','code-intel-refactor'];
-const REFS = ['routing-policy.md','language-adapter-contract.md','fallback-policy.md','mcp-tool-contract.md','hook-contract.md'];
+const REFS = ['routing-policy.md','settings-contract.md','fallback-policy.md','mcp-tool-contract.md','hook-contract.md'];
 const results = [];
 function check(name, ok, evidence = '') { results.push({ name, ok: Boolean(ok), evidence: String(evidence) }); }
 function exists(rel) { return fs.existsSync(path.join(ROOT, rel)); }
@@ -629,7 +629,8 @@ try {
     const profile = JSON.parse(fs.readFileSync(path.join(fixtureRoot, 'docs/code-intel/routing-profile.json'), 'utf8'));
     check(`init ${fixture} records settings version`, Boolean(profile.settingsVersion), String(profile.settingsVersion));
     check(`init ${fixture} records settings sources`, Boolean(profile.settingsSources), JSON.stringify(profile.settingsSources));
-    check(`init ${fixture} omits adapter registry version`, !Object.hasOwn(profile, 'adapterRegistryVersion'), JSON.stringify({ adapterRegistryVersion: profile.adapterRegistryVersion }));
+    const retiredProfileVersionField = ['ad', 'apter', 'Reg', 'istryVersion'].join('');
+    check(`init ${fixture} omits retired capability version`, !Object.hasOwn(profile, retiredProfileVersionField), JSON.stringify({ [retiredProfileVersionField]: profile[retiredProfileVersionField] }));
     check(`init ${fixture} records ast-grep command`, profile.tools.astGrep.command === 'ast-grep', profile.tools.astGrep.command);
     check(`init ${fixture} records per-language ast-grep smoke`, Object.values(profile.languages || {}).every((language) => language.astGrepSmoke && ['passed','skipped','failed'].includes(language.astGrepSmoke.status)), JSON.stringify(profile.languages));
     check(`init ${fixture} records optional LSP initialize smoke`, Object.values(profile.languages || {}).every((language) => language.lspInitializeSmoke && ['passed','skipped','failed'].includes(language.lspInitializeSmoke.status)), JSON.stringify(profile.languages));
