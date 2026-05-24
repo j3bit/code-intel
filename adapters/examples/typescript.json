@@ -1,0 +1,10 @@
+{
+  "language": "typescript",
+  "extensions": [".ts", ".tsx"],
+  "astGrep": { "languageId": "typescript", "supported": "builtin" },
+  "lsp": {
+    "commands": ["typescript-language-server --stdio"],
+    "capabilities": ["definition", "references", "rename", "diagnostics", "symbols"]
+  },
+  "fallback": ["rg", "grep"]
+}

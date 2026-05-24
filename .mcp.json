@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "code-intel": {
+      "command": "node",
+      "args": ["/Users/jeongsaebit/Dev/codex-plugins/code-intel/mcp/code-intel-server/index.js"],
+      "env": {}
+    }
+  }
+}

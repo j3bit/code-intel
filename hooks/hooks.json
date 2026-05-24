@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node \"${PLUGIN_ROOT}/hooks/user-prompt-submit.js\"" }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node \"${PLUGIN_ROOT}/hooks/pre-tool-use.js\"" }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node \"${PLUGIN_ROOT}/hooks/post-tool-use.js\"" }
+        ]
+      }
+    ]
+  }
+}

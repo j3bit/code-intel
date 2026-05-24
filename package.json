@@ -1,0 +1,22 @@
+{
+  "name": "code-intel",
+  "version": "0.1.0",
+  "description": "Standalone Codex plugin for AST/LSP code intelligence with graceful fallback.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "bin": {
+    "code-intel-mcp": "mcp/code-intel-server/index.js",
+    "init-code-intel": "scripts/init-code-intel.js",
+    "doctor-code-intel": "scripts/doctor-code-intel.js",
+    "validate-code-intel-plugin": "scripts/validate-plugin.js"
+  },
+  "scripts": {
+    "mcp:list-tools": "node mcp/code-intel-server/index.js --list-tools",
+    "init:code-intel": "node scripts/init-code-intel.js",
+    "doctor:code-intel": "node scripts/doctor-code-intel.js",
+    "validate": "node scripts/validate-plugin.js"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

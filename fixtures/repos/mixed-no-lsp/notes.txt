@@ -1,0 +1,1 @@
+This fixture has JavaScript and text files. It is useful for partial support and fallback checks.

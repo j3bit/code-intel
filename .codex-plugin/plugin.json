@@ -1,0 +1,39 @@
+{
+  "name": "code-intel",
+  "version": "0.1.0",
+  "description": "Language-aware code intelligence for Codex: AST search, LSP navigation, preview-only refactors, and explicit fallback routing.",
+  "author": {
+    "name": "Local"
+  },
+  "homepage": "https://github.com/j3bit/code-intel",
+  "repository": "https://github.com/j3bit/code-intel",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "mcp",
+    "code-intelligence",
+    "ast-grep",
+    "lsp",
+    "refactoring"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Code Intel",
+    "shortDescription": "Prefer AST/LSP code intelligence before text fallback.",
+    "longDescription": "Code Intel adds standalone Codex skills, an MCP server, adapter registry, optional soft hooks, and validation workflows so agents can use language-aware search, navigation, references, rename previews, rewrite previews, and post-edit diagnostics with explicit fallback reasons.",
+    "developerName": "Local",
+    "category": "Coding",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Use code-intel before text fallback."
+    ],
+    "brandColor": "#2563EB",
+    "screenshots": []
+  },
+  "hooks": "./hooks/hooks.json"
+}

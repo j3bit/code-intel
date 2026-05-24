@@ -1,0 +1,542 @@
+#!/usr/bin/env node
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import { spawn, spawnSync } from 'node:child_process';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { tools, callTool, loadRegistry, splitCommandLine } from '../mcp/code-intel-server/core.js';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const EXPECTED_TOOLS = ['capability_discover','ast_grep_search','ast_grep_replace_preview','lsp_diagnostics','lsp_symbols','lsp_goto_definition','lsp_find_references','lsp_prepare_rename','lsp_rename_preview'];
+const SKILLS = ['code-intel','init-code-intel','code-intel-doctor','code-intel-refactor'];
+const REFS = ['routing-policy.md','language-adapter-contract.md','fallback-policy.md','mcp-tool-contract.md','hook-contract.md'];
+const results = [];
+function check(name, ok, evidence = '') { results.push({ name, ok: Boolean(ok), evidence: String(evidence) }); }
+function exists(rel) { return fs.existsSync(path.join(ROOT, rel)); }
+function readJson(rel) { return JSON.parse(fs.readFileSync(path.join(ROOT, rel), 'utf8')); }
+function run(cmd, args, opts = {}) { return spawnSync(cmd, args, { cwd: ROOT, encoding: 'utf8', timeout: 15000, maxBuffer: 10 * 1024 * 1024, ...opts }); }
+function rel(file) { return path.relative(ROOT, file); }
+function writeJson(file, value) { fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n'); }
+function validateSkillFrontmatter(relPath) {
+  const body = fs.readFileSync(path.join(ROOT, relPath), 'utf8');
+  const lines = body.split(/\r?\n/);
+  if (lines[0] !== '---') return 'missing opening frontmatter delimiter';
+  const end = lines.findIndex((line, index) => index > 0 && line === '---');
+  if (end < 0) return 'missing closing frontmatter delimiter';
+  const data = {};
+  for (let index = 1; index < end; index += 1) {
+    const line = lines[index];
+    if (!line.trim()) continue;
+    const match = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(line);
+    if (!match) return `invalid frontmatter line ${index + 1}: ${line}`;
+    const [, key, value] = match;
+    const trimmed = value.trim();
+    const quoted = (trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"));
+    if (!quoted && /:\s/.test(trimmed)) {
+      return `unquoted colon-space in ${key} on line ${index + 1}`;
+    }
+    data[key] = trimmed;
+  }
+  if (!data.name || !data.description) return 'missing required name or description';
+  return '';
+}
+function mcpFrame(message) {
+  const body = JSON.stringify(message);
+  return Buffer.from(`Content-Length: ${Buffer.byteLength(body, 'utf8')}\r\n\r\n${body}`);
+}
+function initializeFrame() {
+  return mcpFrame({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'initialize',
+    params: { protocolVersion: '2024-11-05' }
+  });
+}
+function unsupportedInitializeFrame() {
+  return mcpFrame({
+    jsonrpc: '2.0',
+    id: 2,
+    method: 'initialize',
+    params: { protocolVersion: '2099-99-99' }
+  });
+}
+function framedInitializeOk(result) {
+  const stdout = result.stdout || '';
+  return result.status === 0 && stdout.includes('Content-Length:') && stdout.includes('code-intel');
+}
+function framedEvidence(result) {
+  return result.stdout || result.stderr || result.error?.message || '';
+}
+function mcpManifestServer() {
+  return readJson('.mcp.json').mcpServers?.['code-intel'];
+}
+function finish() {
+  const failed = results.filter((r) => !r.ok);
+  const report = { status: failed.length ? 'failed' : 'passed', total: results.length, passed: results.length - failed.length, failed: failed.length, results };
+  if (process.argv.includes('--json')) console.log(JSON.stringify(report, null, 2));
+  else {
+    for (const r of results) console.log(`${r.ok ? 'PASS' : 'FAIL'} ${r.name}${r.evidence ? ` — ${r.evidence}` : ''}`);
+    console.log(`\n${report.status}: ${report.passed}/${report.total} checks passed`);
+  }
+  process.exit(failed.length ? 1 : 0);
+}
+
+// Plugin structure validation
+check('plugin manifest exists', exists('.codex-plugin/plugin.json'), '.codex-plugin/plugin.json');
+const manifest = readJson('.codex-plugin/plugin.json');
+check('manifest required fields', ['name','version','description','skills','interface'].every((k) => manifest[k]), Object.keys(manifest).join(', '));
+check('manifest name is code-intel', manifest.name === 'code-intel', manifest.name);
+check('mcp server manifest exists', exists('.mcp.json'), '.mcp.json');
+check('hook manifest declared when hooks are shipped', manifest.hooks === './hooks/hooks.json' && exists('hooks/hooks.json'), manifest.hooks || '(missing)');
+for (const skill of SKILLS) check(`skill ${skill} exists`, exists(`skills/${skill}/SKILL.md`), `skills/${skill}/SKILL.md`);
+for (const skill of SKILLS) {
+  const relPath = `skills/${skill}/SKILL.md`;
+  const error = exists(relPath) ? validateSkillFrontmatter(relPath) : 'missing file';
+  check(`skill ${skill} frontmatter parseable`, !error, error || relPath);
+}
+for (const ref of REFS) check(`reference ${ref} exists`, exists(`references/${ref}`), `references/${ref}`);
+check('adapter schema exists', exists('adapters/schema.json'), 'adapters/schema.json');
+check('adapter registry exists', exists('adapters/registry.json'), 'adapters/registry.json');
+let registry;
+try {
+  registry = loadRegistry();
+} catch (error) {
+  check('registry validates against adapters/schema.json', false, error.message);
+  finish();
+}
+check('registry has version and adapters', Boolean(registry.version && Array.isArray(registry.adapters) && registry.adapters.length), registry.version);
+check('registry validates against adapters/schema.json', true, 'loadRegistry completed schema-backed validation');
+for (const adapter of registry.adapters) {
+  check(`adapter ${adapter.language} shape`, Boolean(adapter.language && adapter.extensions?.length && adapter.astGrep?.languageId && adapter.lsp && adapter.fallback?.length && adapter.fixtures), JSON.stringify(adapter));
+}
+if (!process.env.CODE_INTEL_EXPECT_VALIDATION_FAILURE) {
+  const malformedRegistryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-bad-registry-'));
+  try {
+    writeJson(path.join(malformedRegistryRoot, 'bad-registry.json'), { version: 'bad', adapters: [{ language: 'bad' }] });
+    const badRegistryRun = run('node', ['scripts/validate-plugin.js', '--json'], {
+      env: { ...process.env, CODE_INTEL_REGISTRY_PATH: path.join(malformedRegistryRoot, 'bad-registry.json'), CODE_INTEL_EXPECT_VALIDATION_FAILURE: '1' }
+    });
+    const badRegistryEvidence = `${badRegistryRun.stdout}\n${badRegistryRun.stderr}`;
+    check('registry schema validation rejects malformed registry', badRegistryRun.status !== 0 && badRegistryEvidence.includes('schema'), badRegistryEvidence.slice(0, 500));
+  } finally {
+    fs.rmSync(malformedRegistryRoot, { recursive: true, force: true });
+  }
+}
+check('scripts executable or documented', ['scripts/init-code-intel.js','scripts/doctor-code-intel.js','scripts/validate-plugin.js'].every((f) => fs.statSync(path.join(ROOT, f)).mode & 0o111), 'init/doctor/validate executable');
+
+// MCP contract validation
+const list = run('node', ['mcp/code-intel-server/index.js', '--list-tools']);
+check('MCP server list-tools starts', list.status === 0, list.stderr || list.stdout.slice(0, 200));
+const framedInit = run(process.execPath, ['mcp/code-intel-server/index.js'], { input: initializeFrame() });
+check('MCP framed initialize works', framedInitializeOk(framedInit), framedEvidence(framedInit));
+const mcpServer = mcpManifestServer();
+check('MCP manifest declares code-intel server', Boolean(mcpServer?.command && Array.isArray(mcpServer.args)), JSON.stringify(mcpServer || {}));
+if (mcpServer?.command && Array.isArray(mcpServer.args)) {
+  const manifestInit = spawnSync(mcpServer.command, mcpServer.args, {
+    cwd: os.tmpdir(),
+    input: initializeFrame(),
+    encoding: 'utf8',
+    timeout: 5000,
+    maxBuffer: 10 * 1024 * 1024
+  });
+  check('MCP manifest starts from outside repository cwd', framedInitializeOk(manifestInit), framedEvidence(manifestInit));
+}
+const unsupportedFramedInit = run(process.execPath, ['mcp/code-intel-server/index.js'], { input: unsupportedInitializeFrame() });
+check(
+  'MCP initialize does not echo unsupported protocol versions',
+  unsupportedFramedInit.status === 0 &&
+    unsupportedFramedInit.stdout.includes('Content-Length:') &&
+    unsupportedFramedInit.stdout.includes('"protocolVersion":"2024-11-05"') &&
+    !unsupportedFramedInit.stdout.includes('2099-99-99'),
+  framedEvidence(unsupportedFramedInit)
+);
+let listed = [];
+try { listed = JSON.parse(list.stdout).tools.map((t) => t.name); } catch {}
+check('tool list includes expected tools', EXPECTED_TOOLS.every((t) => listed.includes(t)), listed.join(', '));
+for (const tool of tools) check(`tool ${tool.name} schema`, Boolean(tool.name && tool.description && tool.inputSchema && tool.outputSchema), tool.description);
+const discover = callTool('capability_discover', { repoRoot: ROOT });
+check('capability_discover works', Boolean(discover.repoRoot && discover.tools?.astGrep?.command === 'ast-grep'), discover.repoRoot);
+const windowsPathParts = splitCommandLine(String.raw`C:\Tools\pyright-langserver.cmd --stdio`);
+check(
+  'splitCommandLine preserves unquoted Windows path backslashes',
+  windowsPathParts[0] === String.raw`C:\Tools\pyright-langserver.cmd` && windowsPathParts[1] === '--stdio',
+  JSON.stringify(windowsPathParts)
+);
+const quotedWindowsPathParts = splitCommandLine(String.raw`"C:\Program Files\Pyright\pyright-langserver.cmd" --stdio`);
+check(
+  'splitCommandLine preserves quoted Windows path backslashes and spaces',
+  quotedWindowsPathParts[0] === String.raw`C:\Program Files\Pyright\pyright-langserver.cmd` && quotedWindowsPathParts[1] === '--stdio',
+  JSON.stringify(quotedWindowsPathParts)
+);
+const missingAst = callTool('ast_grep_search', { repoRoot: ROOT, language: 'definitely-unsupported', pattern: 'class $A' });
+check('ast-grep unsupported language reports unavailable cleanly', missingAst.status === 'unavailable' && missingAst.fallbackReason.includes('unsupported'), JSON.stringify(missingAst));
+const missingLsp = callTool('lsp_find_references', { repoRoot: ROOT, language: 'json', file: 'package.json', position: { line: 0, character: 0 } });
+check('LSP tool reports unavailable cleanly when no server declared', missingLsp.status === 'unavailable' && missingLsp.fallbackReason, JSON.stringify(missingLsp));
+const emptyToolPathRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-empty-path-'));
+try {
+  const emptyToolPath = path.join(emptyToolPathRoot, 'bin');
+  fs.mkdirSync(emptyToolPath, { recursive: true });
+  const noAstEnv = { ...process.env, PATH: emptyToolPath };
+  const noAstLspFallbackRun = run(process.execPath, ['mcp/code-intel-server/index.js', '--call-tool', 'lsp_symbols', '--args', JSON.stringify({ repoRoot: ROOT, language: 'json', file: 'package.json' })], {
+    env: noAstEnv
+  });
+  try {
+    const noAstLspFallback = JSON.parse(noAstLspFallbackRun.stdout || '{}');
+    check(
+      'LSP unavailable fallback omits ast-grep when executable is missing',
+      noAstLspFallback.status === 'unavailable' &&
+        noAstLspFallback.fallbackUsed === 'rg/grep' &&
+        noAstLspFallback.fallbackReason === 'LSP command missing',
+      noAstLspFallbackRun.stdout.slice(0, 500) || noAstLspFallbackRun.stderr.slice(0, 500)
+    );
+  } catch (error) {
+    check('LSP unavailable fallback omits ast-grep when executable is missing', false, error.message);
+  }
+  const noAstPath = run(process.execPath, ['mcp/code-intel-server/index.js', '--call-tool', 'ast_grep_search', '--args', JSON.stringify({ repoRoot: ROOT, language: 'typescript', pattern: 'class $A' })], { env: noAstEnv });
+  try {
+    const noAst = JSON.parse(noAstPath.stdout || '{}');
+    check('missing ast-grep PATH simulation reports explicit fallback', noAst.status === 'unavailable' && noAst.fallbackReason.includes('ast-grep executable was not found') && noAst.commandPolicy.includes('sg'), noAstPath.stdout.slice(0, 500) || noAstPath.stderr.slice(0, 500));
+  } catch (error) {
+    check('missing ast-grep PATH simulation reports explicit fallback', false, error.message);
+  }
+} finally {
+  fs.rmSync(emptyToolPathRoot, { recursive: true, force: true });
+}
+const fakeLspRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-fake-lsp-'));
+try {
+  const fakeBinDir = path.join(fakeLspRoot, 'bin');
+  fs.mkdirSync(fakeBinDir, { recursive: true });
+  const fakeNoVersionLsp = path.join(fakeBinDir, 'fake-no-version-lsp');
+  fs.writeFileSync(fakeNoVersionLsp, `#!/usr/bin/env node
+if (process.argv.slice(2).includes('--version')) {
+  console.error('fake-no-version-lsp: --version is intentionally unsupported');
+  process.exit(7);
+}
+await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-lsp-server.js')).href)});
+`);
+  fs.chmodSync(fakeNoVersionLsp, 0o755);
+  const fakeRegistry = {
+    version: 'test-fake-lsp',
+    adapters: [{
+      language: 'typescript',
+      extensions: ['.ts'],
+      astGrep: { languageId: 'typescript', supported: 'builtin' },
+      lsp: { commands: ['fake-no-version-lsp --stdio'], capabilities: ['definition', 'references', 'rename', 'diagnostics', 'symbols'] },
+      fallback: ['rg', 'grep'],
+      fixtures: { repo: 'fixtures/repos/typescript-basic', expectedAst: true, expectedLsp: true }
+    }]
+  };
+  const fakeRegistryPath = path.join(fakeLspRoot, 'registry.json');
+  const fakeLspEnv = { ...process.env, PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH || ''}`, CODE_INTEL_REGISTRY_PATH: fakeRegistryPath };
+  writeJson(fakeRegistryPath, fakeRegistry);
+  const pathEscapeProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'lsp_symbols', '--args', JSON.stringify({ repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'), language: 'typescript', file: '../python-basic/example.py' })], {
+    env: fakeLspEnv
+  });
+  const absolutePathProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'lsp_symbols', '--args', JSON.stringify({ repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'), language: 'typescript', file: path.join(ROOT, 'fixtures/repos/typescript-basic/src/math.ts') })], {
+    env: fakeLspEnv
+  });
+  const pathEscapeOutput = JSON.parse(pathEscapeProbe.stdout || '{}');
+  const absolutePathOutput = JSON.parse(absolutePathProbe.stdout || '{}');
+  check('LSP rejects repo path traversal before reading files', pathEscapeOutput.status === 'unavailable' && /escapes repo root|outside repo root/.test(pathEscapeOutput.fallbackReason || ''), pathEscapeProbe.stdout.slice(0, 500) || pathEscapeProbe.stderr.slice(0, 500));
+  check('LSP rejects absolute file paths before reading files', absolutePathOutput.status === 'unavailable' && /repo-relative/.test(absolutePathOutput.fallbackReason || ''), absolutePathProbe.stdout.slice(0, 500) || absolutePathProbe.stderr.slice(0, 500));
+  const lspDiscoveryProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'capability_discover', '--args', JSON.stringify({ repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic') })], {
+    env: fakeLspEnv
+  });
+  const lspDiscovery = JSON.parse(lspDiscoveryProbe.stdout || '{}');
+  check(
+    'LSP executable detection does not require --version support',
+    lspDiscovery.languages?.typescript?.lsp === 'commandDetected' && lspDiscovery.languages.typescript.lspCommand === 'fake-no-version-lsp --stdio',
+    lspDiscoveryProbe.stdout.slice(0, 800) || lspDiscoveryProbe.stderr.slice(0, 800)
+  );
+  const lspProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'lsp_symbols', '--args', JSON.stringify({ repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'), file: 'src/math.ts' })], {
+    env: fakeLspEnv
+  });
+  const lspOutput = JSON.parse(lspProbe.stdout || '{}');
+  check('LSP tools execute real JSON-RPC operation when server is available', lspProbe.status === 0 && lspOutput.status === 'ok' && lspOutput.method === 'textDocument/documentSymbol' && lspOutput.lspState === 'methodVerified' && Array.isArray(lspOutput.result), lspProbe.stdout.slice(0, 500) || lspProbe.stderr.slice(0, 500));
+} catch (error) {
+  check('LSP tools execute real JSON-RPC operation when server is available', false, error.message);
+} finally {
+  fs.rmSync(fakeLspRoot, { recursive: true, force: true });
+}
+const relativeLspRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-relative-lsp-'));
+try {
+  const targetRepo = path.join(relativeLspRoot, 'repo');
+  const localBin = path.join(targetRepo, 'node_modules', '.bin');
+  fs.mkdirSync(path.join(targetRepo, 'src'), { recursive: true });
+  fs.mkdirSync(localBin, { recursive: true });
+  fs.writeFileSync(path.join(targetRepo, 'src', 'math.ts'), 'export function add(a: number, b: number) { return a + b; }\n');
+
+  const localLsp = path.join(localBin, 'fake-relative-lsp');
+  fs.writeFileSync(localLsp, `#!/usr/bin/env node
+await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-lsp-server.js')).href)});
+`);
+  fs.chmodSync(localLsp, 0o755);
+
+  const relativeRegistryPath = path.join(relativeLspRoot, 'registry.json');
+  writeJson(relativeRegistryPath, {
+    version: 'test-relative-lsp',
+    adapters: [{
+      language: 'typescript',
+      extensions: ['.ts'],
+      astGrep: { languageId: 'typescript', supported: 'builtin' },
+      lsp: { commands: ['./node_modules/.bin/fake-relative-lsp --stdio'], capabilities: ['symbols'] },
+      fallback: ['rg', 'grep'],
+      fixtures: { repo: targetRepo, expectedAst: true, expectedLsp: true }
+    }]
+  });
+
+  const relativeEnv = { ...process.env, CODE_INTEL_REGISTRY_PATH: relativeRegistryPath };
+  const relativeDiscoveryProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'capability_discover', '--args', JSON.stringify({ repoRoot: targetRepo })], {
+    env: relativeEnv
+  });
+  const relativeDiscovery = JSON.parse(relativeDiscoveryProbe.stdout || '{}');
+  check(
+    'LSP executable detection resolves relative commands from repoRoot',
+    relativeDiscovery.languages?.typescript?.lsp === 'commandDetected' &&
+      relativeDiscovery.languages.typescript.lspCommand === './node_modules/.bin/fake-relative-lsp --stdio',
+    relativeDiscoveryProbe.stdout.slice(0, 800) || relativeDiscoveryProbe.stderr.slice(0, 800)
+  );
+
+  const relativeLspProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'lsp_symbols', '--args', JSON.stringify({ repoRoot: targetRepo, file: 'src/math.ts' })], {
+    env: relativeEnv
+  });
+  const relativeLspOutput = JSON.parse(relativeLspProbe.stdout || '{}');
+  check(
+    'LSP tools execute repo-relative command candidates from repoRoot',
+    relativeLspProbe.status === 0 && relativeLspOutput.status === 'ok' && relativeLspOutput.lspState === 'methodVerified',
+    relativeLspProbe.stdout.slice(0, 800) || relativeLspProbe.stderr.slice(0, 800)
+  );
+} catch (error) {
+  check('LSP executable detection resolves relative commands from repoRoot', false, error.message);
+  check('LSP tools execute repo-relative command candidates from repoRoot', false, error.message);
+} finally {
+  fs.rmSync(relativeLspRoot, { recursive: true, force: true });
+}
+const strictLspRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-strict-lsp-'));
+try {
+  const strictRegistry = {
+    version: 'test-strict-lsp',
+    adapters: [{
+      language: 'typescript',
+      extensions: ['.ts'],
+      astGrep: { languageId: 'typescript', supported: 'builtin' },
+      lsp: { commands: [`node "${path.join(ROOT, 'fixtures/lsp/strict-init-lsp-server.js')}"`], capabilities: ['definition', 'references', 'rename', 'diagnostics', 'symbols'] },
+      fallback: ['rg', 'grep'],
+      fixtures: { repo: 'fixtures/repos/typescript-basic', expectedAst: true, expectedLsp: true }
+    }]
+  };
+  const strictRegistryPath = path.join(strictLspRoot, 'registry.json');
+  writeJson(strictRegistryPath, strictRegistry);
+  const strictProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'lsp_symbols', '--args', JSON.stringify({ repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'), file: 'src/math.ts', timeoutMs: 5000 })], {
+    env: { ...process.env, CODE_INTEL_REGISTRY_PATH: strictRegistryPath }
+  });
+  const strictOutput = JSON.parse(strictProbe.stdout || '{}');
+  check(
+    'LSP client waits for initialize before sending follow-up messages',
+    strictProbe.status === 0 && strictOutput.status === 'ok' && strictOutput.serverInfo?.name === 'code-intel-strict-init-lsp' && Array.isArray(strictOutput.result),
+    strictProbe.stdout.slice(0, 800) || strictProbe.stderr.slice(0, 800)
+  );
+} catch (error) {
+  check('LSP client waits for initialize before sending follow-up messages', false, error.message);
+} finally {
+  fs.rmSync(strictLspRoot, { recursive: true, force: true });
+}
+const previewBefore = fs.readFileSync(path.join(ROOT, 'fixtures/repos/typescript-basic/src/math.ts'), 'utf8');
+const previewResult = callTool('ast_grep_replace_preview', { repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'), language: 'typescript', pattern: 'add($A, $B)', replacement: 'sum($A, $B)', maxResults: 5 });
+const previewAfter = fs.readFileSync(path.join(ROOT, 'fixtures/repos/typescript-basic/src/math.ts'), 'utf8');
+check('preview tools do not mutate files', previewBefore === previewAfter, 'typescript fixture unchanged');
+const previewUnavailable = previewResult.status === 'unavailable';
+const previewOk = previewResult.status === 'ok';
+check(
+  'replace preview degrades cleanly when ast-grep is unavailable',
+  previewUnavailable
+    ? previewResult.previewOnly === true &&
+      previewResult.mutated === false &&
+      Array.isArray(previewResult.fallback) &&
+      previewResult.fallback.includes('rg') &&
+      /ast-grep executable was not found/.test(previewResult.fallbackReason || '')
+    : true,
+  JSON.stringify(previewResult).slice(0, 800)
+);
+check(
+  'replace preview is honest match-only unless substitution is proven',
+  previewUnavailable ||
+    (previewOk &&
+      previewResult.previewOnly === true &&
+      previewResult.mutated === false &&
+      previewResult.mode === 'match-only' &&
+      previewResult.manualEditRequired === true &&
+      (previewResult.patchCandidates || []).every((candidate) =>
+        !Object.prototype.hasOwnProperty.call(candidate, 'after') &&
+        candidate.replacementTemplate
+      )),
+  JSON.stringify(previewResult).slice(0, 800)
+);
+check(
+  'ast-grep result rows include language evidence when preview is available',
+  previewUnavailable ||
+    (previewResult.patchCandidates || []).every((candidate) => candidate.confidence === 'ast-grep'),
+  JSON.stringify(previewResult).slice(0, 500)
+);
+
+// Init workflow validation
+const initTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-fixtures-'));
+try {
+  for (const fixture of ['typescript-basic','python-basic','mixed-no-lsp','unsupported-language']) {
+    const sourceFixtureRoot = path.join(ROOT, 'fixtures/repos', fixture);
+    const fixtureRoot = path.join(initTmpRoot, fixture);
+    fs.cpSync(sourceFixtureRoot, fixtureRoot, { recursive: true, filter: (src) => !src.includes(`${path.sep}docs${path.sep}code-intel`) });
+    const first = run('node', ['scripts/init-code-intel.js', '--repo', fixtureRoot, '--json']);
+    const second = run('node', ['scripts/init-code-intel.js', '--repo', fixtureRoot, '--json']);
+    check(`init ${fixture} succeeds twice`, first.status === 0 && second.status === 0, (first.stderr || second.stderr || '').slice(0, 300));
+    for (const report of ['capability-report.md','routing-profile.json','validation-report.md']) check(`init ${fixture} writes ${report}`, fs.existsSync(path.join(fixtureRoot, 'docs/code-intel', report)), report);
+    const profile = JSON.parse(fs.readFileSync(path.join(fixtureRoot, 'docs/code-intel/routing-profile.json'), 'utf8'));
+    check(`init ${fixture} records ast-grep command`, profile.tools.astGrep.command === 'ast-grep', profile.tools.astGrep.command);
+    check(`init ${fixture} records per-language ast-grep smoke`, Object.values(profile.languages || {}).every((language) => language.astGrepSmoke && ['passed','skipped','failed'].includes(language.astGrepSmoke.status)), JSON.stringify(profile.languages));
+    check(`init ${fixture} records optional LSP initialize smoke`, Object.values(profile.languages || {}).every((language) => language.lspInitializeSmoke && ['passed','skipped','failed'].includes(language.lspInitializeSmoke.status)), JSON.stringify(profile.languages));
+    check(`init ${fixture} fallback explicit`, Boolean(profile.commandPolicy && profile.tools.astGrep.note), profile.commandPolicy);
+  }
+} finally {
+  fs.rmSync(initTmpRoot, { recursive: true, force: true });
+}
+const staleTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-stale-profile-'));
+try {
+  fs.cpSync(path.join(ROOT, 'fixtures/repos/typescript-basic'), staleTmpRoot, { recursive: true });
+  const staleDocs = path.join(staleTmpRoot, 'docs/code-intel');
+  fs.mkdirSync(staleDocs, { recursive: true });
+  writeJson(path.join(staleDocs, 'routing-profile.json'), {
+    repoRoot: staleTmpRoot,
+    generatedAt: '2020-01-01T00:00:00.000Z',
+    pluginVersion: '0.0.0-stale',
+    adapterRegistryVersion: '0.0.0-stale',
+    tools: { astGrep: { command: 'ast-grep', available: true } },
+    languages: {},
+    inventory: { totalFiles: 0, languages: {} }
+  });
+  const doctorRun = run('node', ['scripts/doctor-code-intel.js', '--repo', staleTmpRoot, '--json']);
+  const doctor = JSON.parse(doctorRun.stdout || '{}');
+  const reasons = (doctor.findings || []).map((finding) => finding.reason).join(' | ');
+  check('doctor detects stale routing profile version and inventory mismatch', reasons.includes('plugin version differs') && reasons.includes('adapter registry version differs') && reasons.includes('language inventory major mismatch'), reasons);
+  fs.writeFileSync(path.join(staleDocs, 'routing-profile.json'), '{bad json');
+  const corruptDoctorRun = run('node', ['scripts/doctor-code-intel.js', '--repo', staleTmpRoot, '--json']);
+  const corruptDoctor = JSON.parse(corruptDoctorRun.stdout || '{}');
+  const corruptReasons = (corruptDoctor.findings || []).map((finding) => finding.reason).join(' | ');
+  check('doctor survives malformed routing profile and reports live fallback', corruptDoctorRun.status === 0 && corruptReasons.includes('routing profile unreadable'), corruptReasons || corruptDoctorRun.stderr);
+} finally {
+  fs.rmSync(staleTmpRoot, { recursive: true, force: true });
+}
+
+// Hook validation
+const hookManifest = readJson('hooks/hooks.json');
+check('hook manifest wires soft hook commands', ['UserPromptSubmit','PreToolUse','PostToolUse'].every((hook) => JSON.stringify(hookManifest.hooks?.[hook] || '').includes('${PLUGIN_ROOT}/hooks/')), JSON.stringify(hookManifest).slice(0, 500));
+function parseHookOutput(stdout) {
+  if (!stdout.trim()) return { ok: true, empty: true, value: null, evidence: 'empty stdout' };
+  try {
+    const value = JSON.parse(stdout);
+    return { ok: true, empty: false, value, evidence: stdout };
+  } catch (error) {
+    return { ok: false, empty: false, value: null, evidence: error.message };
+  }
+}
+function validSoftHookOutput(stdout, expected) {
+  const parsed = parseHookOutput(stdout);
+  if (!parsed.ok || parsed.empty || !parsed.value || Array.isArray(parsed.value)) return { ok: false, evidence: parsed.evidence };
+  const allowedTopLevel = new Set(['continue', 'stopReason', 'suppressOutput', 'systemMessage', 'decision', 'reason', 'hookSpecificOutput']);
+  const unknownTopLevel = Object.keys(parsed.value).filter((key) => !allowedTopLevel.has(key));
+  const hookSpecificOutput = parsed.value.hookSpecificOutput;
+  const ok = unknownTopLevel.length === 0 &&
+    hookSpecificOutput &&
+    hookSpecificOutput.hookEventName === expected &&
+    typeof hookSpecificOutput.additionalContext === 'string' &&
+    hookSpecificOutput.additionalContext.includes('code-intel') &&
+    hookSpecificOutput.additionalContext.length < 500;
+  return { ok, evidence: ok ? hookSpecificOutput.additionalContext : JSON.stringify({ unknownTopLevel, value: parsed.value }).slice(0, 800) };
+}
+const hookCases = [
+  ['hooks/user-prompt-submit.js', 'rename symbol and find references', 'UserPromptSubmit'],
+  ['hooks/pre-tool-use.js', '{"cmd":"rg class Foo"}', 'PreToolUse'],
+  ['hooks/post-tool-use.js', '{"tool":"apply_patch","status":"changed"}', 'PostToolUse']
+];
+for (const [hook, input, expected] of hookCases) {
+  const r = run('node', [hook], { input });
+  const result = validSoftHookOutput(r.stdout, expected);
+  check(`${expected} emits Codex-compatible short JSON nudge`, r.status === 0 && result.ok, result.evidence || r.stderr);
+}
+const preAllow = run('node', ['hooks/pre-tool-use.js'], { input: '{"cmd":"rg TODO"}' });
+check('PreToolUse does not block ordinary rg', preAllow.status === 0, `stdout bytes=${preAllow.stdout.length}`);
+const preManualReplace = run('node', ['hooks/pre-tool-use.js'], { input: '{"tool":"apply_patch","description":"replace function add with sum across files"}' });
+const preManualReplaceResult = validSoftHookOutput(preManualReplace.stdout, 'PreToolUse');
+check('PreToolUse nudges manual structural replace/edit patterns', preManualReplace.status === 0 && preManualReplaceResult.ok, preManualReplaceResult.evidence || preManualReplace.stderr);
+const splitFrame = await new Promise((resolve) => {
+  const child = spawn(process.execPath, ['mcp/code-intel-server/index.js'], {
+    cwd: ROOT,
+    stdio: ['pipe', 'pipe', 'pipe']
+  });
+  const raw = initializeFrame();
+  let stdout = '';
+  let stderr = '';
+  let settled = false;
+  const timer = setTimeout(() => {
+    if (settled) return;
+    settled = true;
+    child.kill();
+    resolve({ status: 124, stdout, stderr: stderr || 'timed out waiting for split framed initialize response' });
+  }, 5000);
+  child.stdout.on('data', (chunk) => { stdout += chunk.toString('utf8'); });
+  child.stderr.on('data', (chunk) => { stderr += chunk.toString('utf8'); });
+  child.on('error', (error) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    resolve({ status: 1, stdout, stderr: error.message });
+  });
+  child.on('exit', (code) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    resolve({ status: code ?? 0, stdout, stderr });
+  });
+  child.stdin.write(raw.subarray(0, 4));
+  setTimeout(() => {
+    child.stdin.write(raw.subarray(4));
+    child.stdin.end();
+  }, 50);
+});
+check(
+  'MCP split framed initialize works without parse error',
+  framedInitializeOk(splitFrame) && !splitFrame.stdout.toLowerCase().includes('error'),
+  framedEvidence(splitFrame)
+);
+
+// Behavior scenarios
+const behavior = [
+  ['find class or function definition', 'lsp when available, else ast-grep, else rg'],
+  ['find references', 'lsp_find_references, then ast_grep_search, then rg'],
+  ['rename symbol', 'lsp_prepare_rename and lsp_rename_preview, else preview fallback'],
+  ['rewrite structural pattern', 'ast_grep_replace_preview only, then normal edits'],
+  ['edit file then run diagnostics', 'lsp_diagnostics when available'],
+  ['unsupported language fallback', 'rg/grep with reason'],
+  ['missing ast-grep fallback', 'rg/grep with reason'],
+  ['missing LSP fallback', 'ast-grep or rg/grep with reason']
+];
+const routingPolicy = fs.readFileSync(path.join(ROOT, 'references/routing-policy.md'), 'utf8') + fs.readFileSync(path.join(ROOT, 'references/fallback-policy.md'), 'utf8');
+for (const [name, expectation] of behavior) check(`behavior documented: ${name}`, expectation.split(/,? then |, | and | with /).some((token) => routingPolicy.toLowerCase().includes(token.trim().toLowerCase().split(' ')[0])), expectation);
+
+// No forbidden command path in executable/config surfaces.
+const scanFiles = [];
+for (const dir of ['scripts','hooks','adapters','mcp']) {
+  const stack = [path.join(ROOT, dir)];
+  while (stack.length) {
+    const item = stack.pop();
+    for (const entry of fs.readdirSync(item, { withFileTypes: true })) {
+      const full = path.join(item, entry.name);
+      if (entry.isDirectory()) stack.push(full);
+      else scanFiles.push(full);
+    }
+  }
+}
+const commandCallPattern = /(?:spawnSync|spawn|execFile|exec)\s*\(\s*['"]sg['"]|"command"\s*:\s*"sg"/;
+const offenders = scanFiles.filter((file) => commandCallPattern.test(fs.readFileSync(file, 'utf8'))).map(rel);
+check('no script hook registry or MCP path calls forbidden shorthand command', offenders.length === 0, offenders.join(', ') || 'none');
+
+finish();

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Code Intel Adapter Registry",
+  "type": "object",
+  "required": ["version", "adapters"],
+  "properties": {
+    "version": { "type": "string" },
+    "adapters": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["language", "extensions", "astGrep", "lsp", "fallback", "fixtures"],
+        "properties": {
+          "language": { "type": "string" },
+          "extensions": { "type": "array", "items": { "type": "string" } },
+          "astGrep": {
+            "type": "object",
+            "required": ["languageId", "supported"],
+            "properties": {
+              "languageId": { "type": "string" },
+              "supported": { "enum": ["builtin", "unsupported"] }
+            }
+          },
+          "lsp": {
+            "type": "object",
+            "required": ["commands", "capabilities"],
+            "properties": {
+              "commands": { "type": "array", "items": { "type": "string" } },
+              "capabilities": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "fallback": { "type": "array", "items": { "type": "string" } },
+          "fixtures": { "type": "object" }
+        }
+      }
+    }
+  }
+}
