@@ -45,7 +45,7 @@ function markdownCapability(discovery) {
     if (!info.presentFiles) continue;
     lines.push(`### ${language}`, '', `- files: ${info.presentFiles}`, `- AST: ${info.astGrep}`, `- ast-grep smoke: ${info.astGrepSmoke?.status || 'not-run'}`, `- LSP: ${info.lsp}${info.lspCommand ? ` (${info.lspCommand}; method readiness requires smoke)` : ''}`, `- LSP initialize smoke: ${info.lspInitializeSmoke?.status || 'not-run'}`, `- fallback: ${info.fallback.join(', ')}`, '');
   }
-  if (!Object.values(discovery.languages).some((l) => l.presentFiles)) lines.push('No adapter-supported files detected.', '');
+  if (!Object.values(discovery.languages).some((l) => l.presentFiles)) lines.push('No settings-supported files detected.', '');
   lines.push('## Fallback', '', discovery.fallbackPolicy, '');
   return lines.join('\n');
 }
@@ -55,7 +55,8 @@ function markdownValidation(discovery) {
   checks.push(['routing profile generated', true, 'docs/code-intel/routing-profile.json']);
   checks.push(['ast-grep command name', discovery.tools.astGrep.command === 'ast-grep', discovery.tools.astGrep.command]);
   checks.push(['fallback status explicit', Boolean(discovery.fallbackPolicy), discovery.fallbackPolicy]);
-  checks.push(['adapter registry version recorded', Boolean(discovery.adapterRegistryVersion), discovery.adapterRegistryVersion]);
+  checks.push(['settings version recorded', Boolean(discovery.settingsVersion), discovery.settingsVersion]);
+  checks.push(['settings sources recorded', Boolean(discovery.settingsSources), JSON.stringify(discovery.settingsSources)]);
   checks.push(['per-language ast-grep smoke recorded', Object.values(discovery.languages).filter((l) => l.presentFiles).every((l) => l.astGrepSmoke), 'routing-profile languages.*.astGrepSmoke']);
   checks.push(['optional LSP initialize smoke recorded', Object.values(discovery.languages).filter((l) => l.presentFiles).every((l) => l.lspInitializeSmoke), 'routing-profile languages.*.lspInitializeSmoke']);
   const lines = ['# Code Intel Validation Report', '', `Generated: ${discovery.generatedAt}`, '', '| Check | Status | Evidence |', '|---|---:|---|'];
@@ -78,11 +79,12 @@ const profile = {
   repoRoot: discovery.repoRoot,
   generatedAt: discovery.generatedAt,
   pluginVersion: discovery.pluginVersion,
-  adapterRegistryVersion: discovery.adapterRegistryVersion,
+  settingsVersion: discovery.settingsVersion,
+  settingsSources: discovery.settingsSources,
   tools: discovery.tools,
   languages: Object.fromEntries(Object.entries(discovery.languages).filter(([, v]) => v.presentFiles > 0).map(([k, v]) => [k, { astGrep: v.astGrep, astGrepLanguageId: v.astGrepLanguageId, astGrepSmoke: v.astGrepSmoke, lsp: v.lsp, lspState: v.lspState, lspCommand: v.lspCommand, lspInitializeSmoke: v.lspInitializeSmoke, methodVerified: v.lspInitializeSmoke?.status === 'passed' ? ['documentSymbol'] : [], fallback: v.fallback, files: v.presentFiles }])),
   inventory: discovery.inventory,
-  staleRules: ['repo root differs', 'adapter registry version differs', 'plugin version differs', 'profile timestamp predates material plugin upgrade', 'language inventory major mismatch'],
+  staleRules: ['repo root differs', 'settings version differs', 'settings source differs', 'plugin version differs', 'profile timestamp predates material plugin upgrade', 'language inventory major mismatch'],
   commandPolicy: 'this plugin does not call sg'
 };
 writeJson(path.join(docsDir, 'routing-profile.json'), profile);

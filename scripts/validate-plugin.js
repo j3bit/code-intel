@@ -567,6 +567,9 @@ try {
     check(`init ${fixture} succeeds twice`, first.status === 0 && second.status === 0, (first.stderr || second.stderr || '').slice(0, 300));
     for (const report of ['capability-report.md','routing-profile.json','validation-report.md']) check(`init ${fixture} writes ${report}`, fs.existsSync(path.join(fixtureRoot, 'docs/code-intel', report)), report);
     const profile = JSON.parse(fs.readFileSync(path.join(fixtureRoot, 'docs/code-intel/routing-profile.json'), 'utf8'));
+    check(`init ${fixture} records settings version`, Boolean(profile.settingsVersion), String(profile.settingsVersion));
+    check(`init ${fixture} records settings sources`, Boolean(profile.settingsSources), JSON.stringify(profile.settingsSources));
+    check(`init ${fixture} omits adapter registry version`, !Object.hasOwn(profile, 'adapterRegistryVersion'), JSON.stringify({ adapterRegistryVersion: profile.adapterRegistryVersion }));
     check(`init ${fixture} records ast-grep command`, profile.tools.astGrep.command === 'ast-grep', profile.tools.astGrep.command);
     check(`init ${fixture} records per-language ast-grep smoke`, Object.values(profile.languages || {}).every((language) => language.astGrepSmoke && ['passed','skipped','failed'].includes(language.astGrepSmoke.status)), JSON.stringify(profile.languages));
     check(`init ${fixture} records optional LSP initialize smoke`, Object.values(profile.languages || {}).every((language) => language.lspInitializeSmoke && ['passed','skipped','failed'].includes(language.lspInitializeSmoke.status)), JSON.stringify(profile.languages));
@@ -584,7 +587,8 @@ try {
     repoRoot: staleTmpRoot,
     generatedAt: '2020-01-01T00:00:00.000Z',
     pluginVersion: '0.0.0-stale',
-    adapterRegistryVersion: '0.0.0-stale',
+    settingsVersion: 0,
+    settingsSources: { default: 'stale', user: null, project: null },
     tools: { astGrep: { command: 'ast-grep', available: true } },
     languages: {},
     inventory: { totalFiles: 0, languages: {} }
@@ -592,7 +596,7 @@ try {
   const doctorRun = run('node', ['scripts/doctor-code-intel.js', '--repo', staleTmpRoot, '--json']);
   const doctor = JSON.parse(doctorRun.stdout || '{}');
   const reasons = (doctor.findings || []).map((finding) => finding.reason).join(' | ');
-  check('doctor detects stale routing profile version and inventory mismatch', reasons.includes('plugin version differs') && reasons.includes('adapter registry version differs') && reasons.includes('language inventory major mismatch'), reasons);
+  check('doctor detects stale routing profile version and inventory mismatch', reasons.includes('plugin version differs') && reasons.includes('settings version differs') && reasons.includes('language inventory major mismatch'), reasons);
   fs.writeFileSync(path.join(staleDocs, 'routing-profile.json'), '{bad json');
   const corruptDoctorRun = run('node', ['scripts/doctor-code-intel.js', '--repo', staleTmpRoot, '--json']);
   const corruptDoctor = JSON.parse(corruptDoctorRun.stdout || '{}');

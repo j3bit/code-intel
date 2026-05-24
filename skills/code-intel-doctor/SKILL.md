@@ -17,7 +17,7 @@ Doctor reports:
 
 - tool availability,
 - stale profile signals,
-- adapter coverage,
+- effective code-intel settings sources and language coverage,
 - LSP command availability,
 - fallback reasons,
 - safe next actions.
