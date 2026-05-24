@@ -223,7 +223,7 @@ try { listed = JSON.parse(list.stdout).tools.map((t) => t.name); } catch {}
 check('tool list includes expected tools', EXPECTED_TOOLS.every((t) => listed.includes(t)), listed.join(', '));
 for (const tool of tools) check(`tool ${tool.name} schema`, Boolean(tool.name && tool.description && tool.inputSchema && tool.outputSchema), tool.description);
 const discover = callTool('capability_discover', { repoRoot: ROOT });
-check('capability_discover works', Boolean(discover.repoRoot && discover.tools?.astGrep?.command === 'ast-grep'), discover.repoRoot);
+check('capability_discover works', Boolean(discover.repoRoot && discover.settingsVersion === 1 && discover.tools?.astGrep?.command === 'ast-grep'), JSON.stringify({ repoRoot: discover.repoRoot, settingsVersion: discover.settingsVersion, astGrep: discover.tools?.astGrep?.command }));
 const windowsPathParts = splitCommandLine(String.raw`C:\Tools\pyright-langserver.cmd --stdio`);
 check(
   'splitCommandLine preserves unquoted Windows path backslashes',
@@ -283,20 +283,16 @@ if (process.argv.slice(2).includes('--version')) {
 await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-lsp-server.js')).href)});
 `);
   fs.chmodSync(fakeNoVersionLsp, 0o755);
-  const fakeRegistry = {
-    version: 'test-fake-lsp',
-    adapters: [{
-      language: 'typescript',
-      extensions: ['.ts'],
-      astGrep: { languageId: 'typescript', supported: 'builtin' },
-      lsp: { commands: ['fake-no-version-lsp --stdio'], capabilities: ['definition', 'references', 'rename', 'diagnostics', 'symbols'] },
-      fallback: ['rg', 'grep'],
-      fixtures: { repo: 'fixtures/repos/typescript-basic', expectedAst: true, expectedLsp: true }
-    }]
-  };
-  const fakeRegistryPath = path.join(fakeLspRoot, 'registry.json');
-  const fakeLspEnv = { ...process.env, PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH || ''}`, CODE_INTEL_REGISTRY_PATH: fakeRegistryPath };
-  writeJson(fakeRegistryPath, fakeRegistry);
+  const fakeSettingsPath = path.join(fakeLspRoot, 'settings.json');
+  const fakeLspEnv = { ...process.env, PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH || ''}`, CODE_INTEL_PROJECT_SETTINGS_PATH: fakeSettingsPath };
+  writeJson(fakeSettingsPath, {
+    version: 1,
+    languages: {
+      typescript: {
+        lsp: { commands: ['fake-no-version-lsp --stdio'], capabilities: ['definition', 'references', 'rename', 'diagnostics', 'symbols'] }
+      }
+    }
+  });
   const pathEscapeProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'lsp_symbols', '--args', JSON.stringify({ repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'), language: 'typescript', file: '../python-basic/example.py' })], {
     env: fakeLspEnv
   });
@@ -326,6 +322,59 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
 } finally {
   fs.rmSync(fakeLspRoot, { recursive: true, force: true });
 }
+const extraPathLspRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-extra-path-lsp-'));
+try {
+  const targetRepo = path.join(extraPathLspRoot, 'repo');
+  const extraBinDir = path.join(extraPathLspRoot, 'extra-bin');
+  fs.mkdirSync(path.join(targetRepo, 'src'), { recursive: true });
+  fs.mkdirSync(extraBinDir, { recursive: true });
+  fs.writeFileSync(path.join(targetRepo, 'src', 'math.ts'), 'export function add(a: number, b: number) { return a + b; }\n');
+
+  const extraLsp = path.join(extraBinDir, 'fake-extra-path-lsp');
+  fs.writeFileSync(extraLsp, `#!/usr/bin/env node
+await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-lsp-server.js')).href)});
+`);
+  fs.chmodSync(extraLsp, 0o755);
+
+  const extraSettingsPath = path.join(extraPathLspRoot, 'settings.json');
+  writeJson(extraSettingsPath, {
+    version: 1,
+    path: { extraDirs: [extraBinDir] },
+    languages: {
+      typescript: {
+        extensions: ['.ts'],
+        astGrep: { languageId: 'typescript' },
+        lsp: { commands: ['fake-extra-path-lsp --stdio'], capabilities: ['symbols'] }
+      }
+    }
+  });
+  const extraEnv = { ...process.env, CODE_INTEL_PROJECT_SETTINGS_PATH: extraSettingsPath };
+  const extraDiscoveryProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'capability_discover', '--args', JSON.stringify({ repoRoot: targetRepo })], {
+    env: extraEnv
+  });
+  const extraDiscovery = JSON.parse(extraDiscoveryProbe.stdout || '{}');
+  check(
+    'LSP executable detection consults settings path extraDirs',
+    extraDiscovery.languages?.typescript?.lsp === 'commandDetected' &&
+      extraDiscovery.languages.typescript.lspCommands?.[0]?.executablePath === extraLsp,
+    extraDiscoveryProbe.stdout.slice(0, 800) || extraDiscoveryProbe.stderr.slice(0, 800)
+  );
+
+  const extraLspProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'lsp_symbols', '--args', JSON.stringify({ repoRoot: targetRepo, file: 'src/math.ts' })], {
+    env: extraEnv
+  });
+  const extraLspOutput = JSON.parse(extraLspProbe.stdout || '{}');
+  check(
+    'LSP tools execute commands found through settings path extraDirs',
+    extraLspProbe.status === 0 && extraLspOutput.status === 'ok' && extraLspOutput.lspState === 'methodVerified' && extraLspOutput.language === 'typescript',
+    extraLspProbe.stdout.slice(0, 800) || extraLspProbe.stderr.slice(0, 800)
+  );
+} catch (error) {
+  check('LSP executable detection consults settings path extraDirs', false, error.message);
+  check('LSP tools execute commands found through settings path extraDirs', false, error.message);
+} finally {
+  fs.rmSync(extraPathLspRoot, { recursive: true, force: true });
+}
 const relativeLspRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-relative-lsp-'));
 try {
   const targetRepo = path.join(relativeLspRoot, 'repo');
@@ -340,20 +389,19 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
 `);
   fs.chmodSync(localLsp, 0o755);
 
-  const relativeRegistryPath = path.join(relativeLspRoot, 'registry.json');
-  writeJson(relativeRegistryPath, {
-    version: 'test-relative-lsp',
-    adapters: [{
-      language: 'typescript',
-      extensions: ['.ts'],
-      astGrep: { languageId: 'typescript', supported: 'builtin' },
-      lsp: { commands: ['./node_modules/.bin/fake-relative-lsp --stdio'], capabilities: ['symbols'] },
-      fallback: ['rg', 'grep'],
-      fixtures: { repo: targetRepo, expectedAst: true, expectedLsp: true }
-    }]
+  const relativeSettingsPath = path.join(relativeLspRoot, 'settings.json');
+  writeJson(relativeSettingsPath, {
+    version: 1,
+    languages: {
+      typescript: {
+        extensions: ['.ts'],
+        astGrep: { languageId: 'typescript' },
+        lsp: { commands: ['./node_modules/.bin/fake-relative-lsp --stdio'], capabilities: ['symbols'] }
+      }
+    }
   });
 
-  const relativeEnv = { ...process.env, CODE_INTEL_REGISTRY_PATH: relativeRegistryPath };
+  const relativeEnv = { ...process.env, CODE_INTEL_PROJECT_SETTINGS_PATH: relativeSettingsPath };
   const relativeDiscoveryProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'capability_discover', '--args', JSON.stringify({ repoRoot: targetRepo })], {
     env: relativeEnv
   });
@@ -382,21 +430,17 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
 }
 const strictLspRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-strict-lsp-'));
 try {
-  const strictRegistry = {
-    version: 'test-strict-lsp',
-    adapters: [{
-      language: 'typescript',
-      extensions: ['.ts'],
-      astGrep: { languageId: 'typescript', supported: 'builtin' },
-      lsp: { commands: [`node "${path.join(ROOT, 'fixtures/lsp/strict-init-lsp-server.js')}"`], capabilities: ['definition', 'references', 'rename', 'diagnostics', 'symbols'] },
-      fallback: ['rg', 'grep'],
-      fixtures: { repo: 'fixtures/repos/typescript-basic', expectedAst: true, expectedLsp: true }
-    }]
-  };
-  const strictRegistryPath = path.join(strictLspRoot, 'registry.json');
-  writeJson(strictRegistryPath, strictRegistry);
+  const strictSettingsPath = path.join(strictLspRoot, 'settings.json');
+  writeJson(strictSettingsPath, {
+    version: 1,
+    languages: {
+      typescript: {
+        lsp: { commands: [`node "${path.join(ROOT, 'fixtures/lsp/strict-init-lsp-server.js')}"`], capabilities: ['definition', 'references', 'rename', 'diagnostics', 'symbols'] }
+      }
+    }
+  });
   const strictProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'lsp_symbols', '--args', JSON.stringify({ repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'), file: 'src/math.ts', timeoutMs: 5000 })], {
-    env: { ...process.env, CODE_INTEL_REGISTRY_PATH: strictRegistryPath }
+    env: { ...process.env, CODE_INTEL_PROJECT_SETTINGS_PATH: strictSettingsPath }
   });
   const strictOutput = JSON.parse(strictProbe.stdout || '{}');
   check(

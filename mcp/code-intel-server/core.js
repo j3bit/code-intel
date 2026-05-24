@@ -204,7 +204,7 @@ export function detectExecutable(command, args = ['--version']) {
   };
 }
 
-function executableCandidates(command, baseDir = process.cwd()) {
+function executableCandidates(command, baseDir = process.cwd(), settings = null) {
   const hasPathSeparator = command.includes('/') || (process.platform === 'win32' && /[\\/]/.test(command));
   const extensions = process.platform === 'win32'
     ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';').filter(Boolean)
@@ -215,19 +215,27 @@ function executableCandidates(command, baseDir = process.cwd()) {
   if (hasPathSeparator) {
     return names.map((name) => path.isAbsolute(name) ? name : path.resolve(baseDir, name));
   }
-  const dirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  const extraDirs = (settings?.path?.extraDirs || []).map(expandHome);
+  const dirs = [...extraDirs, ...(process.env.PATH || '').split(path.delimiter).filter(Boolean)];
   return dirs.flatMap((dir) => names.map((name) => path.join(dir, name)));
 }
 
-export function executableOnPath(command, baseDir = process.cwd()) {
+export function executableOnPath(command, baseDir = process.cwd(), settings = null) {
   if (!command) return { command, available: false, reason: 'no executable declared' };
-  for (const candidate of executableCandidates(command, baseDir)) {
+  for (const candidate of executableCandidates(command, baseDir, settings)) {
     try {
       fs.accessSync(candidate, fs.constants.X_OK);
       return { command, available: true, path: candidate, reason: 'executable found' };
     } catch {}
   }
   return { command, available: false, reason: 'executable not found on PATH' };
+}
+
+
+function envWithExtraPathDirs(env = process.env, extraDirs = []) {
+  const dirs = (extraDirs || []).map(expandHome).filter(Boolean);
+  if (!dirs.length) return env;
+  return { ...env, PATH: [...dirs, env.PATH || ''].filter(Boolean).join(path.delimiter) };
 }
 
 export function splitCommandLine(commandLine) {
@@ -258,10 +266,10 @@ function firstToken(commandLine) {
   return splitCommandLine(commandLine)[0] || '';
 }
 
-export function commandAvailable(commandLine, baseDir = process.cwd()) {
+export function commandAvailable(commandLine, baseDir = process.cwd(), settings = null) {
   const command = firstToken(commandLine);
   if (!command) return { command: commandLine, available: false, reason: 'no command candidate declared' };
-  const result = executableOnPath(command, baseDir);
+  const result = executableOnPath(command, baseDir, settings);
   return {
     command: commandLine,
     executable: command,
@@ -317,26 +325,43 @@ export function resolveRepoRelativeFile(repoRoot, file) {
   return { ok: true, repoRoot: canonicalRoot, filePath: realCandidate || candidate };
 }
 
+export function languageForFile(file, settings = loadSettings()) {
+  const ext = path.extname(file).toLowerCase();
+  return Object.entries(settings.languages).find(([, language]) => language.extensions.includes(ext))?.[0] || null;
+}
+
+export function languageConfigForFile(file, settings = loadSettings()) {
+  const language = languageForFile(file, settings);
+  return language ? { language, config: settings.languages[language] } : { language: null, config: null };
+}
+
+export function languageConfigForLanguage(language, settings = loadSettings()) {
+  if (!language) return { language: null, config: null };
+  if (settings.languages[language]) return { language, config: settings.languages[language] };
+  const found = Object.entries(settings.languages).find(([, config]) => config.astGrep.languageId === language);
+  return found ? { language: found[0], config: found[1] } : { language: null, config: null };
+}
+
 export function adapterForFile(file, registry = loadRegistry()) {
   const ext = path.extname(file).toLowerCase();
-  return registry.adapters.find((a) => a.extensions.includes(ext));
+  return registry.adapters.find((adapter) => adapter.extensions.includes(ext));
 }
 
 export function adapterForLanguage(language, registry = loadRegistry()) {
-  return registry.adapters.find((a) => a.language === language || a.astGrep.languageId === language);
+  return registry.adapters.find((adapter) => adapter.language === language || adapter.astGrep.languageId === language);
 }
 
-export function languageInventory(repoRoot, registry = loadRegistry()) {
+export function languageInventory(repoRoot, settings = loadSettings(repoRoot)) {
   const files = walkFiles(repoRoot);
   const languages = {};
   const unsupported = {};
   for (const file of files) {
     const rel = path.relative(repoRoot, file);
-    const adapter = adapterForFile(file, registry);
-    if (adapter) {
-      languages[adapter.language] ??= { files: 0, extensions: adapter.extensions, examples: [] };
-      languages[adapter.language].files += 1;
-      if (languages[adapter.language].examples.length < 5) languages[adapter.language].examples.push(rel);
+    const { language, config } = languageConfigForFile(file, settings);
+    if (language && config) {
+      languages[language] ??= { files: 0, extensions: config.extensions, examples: [] };
+      languages[language].files += 1;
+      if (languages[language].examples.length < 5) languages[language].examples.push(rel);
     } else {
       const ext = path.extname(file).toLowerCase() || '[no extension]';
       unsupported[ext] = (unsupported[ext] || 0) + 1;
@@ -346,51 +371,55 @@ export function languageInventory(repoRoot, registry = loadRegistry()) {
 }
 
 export function discoverCapabilities(repoRoot = process.cwd()) {
-  const registry = loadRegistry();
-  const ast = detectExecutable('ast-grep', ['--version']);
-  const inventory = languageInventory(repoRoot, registry);
+  const settings = loadSettings(repoRoot);
+  const ast = detectExecutable(settings.astGrep.command, ['--version']);
+  const inventory = languageInventory(repoRoot, settings);
   const languages = {};
-  for (const adapter of registry.adapters) {
-    const present = inventory.languages[adapter.language]?.files || 0;
-    const lspCommands = adapter.lsp.commands.map((command) => commandAvailable(command, repoRoot));
-    const lspAvailable = lspCommands.find((c) => c.available)?.command || null;
-    languages[adapter.language] = {
+  for (const [language, config] of Object.entries(settings.languages)) {
+    const present = inventory.languages[language]?.files || 0;
+    const lspCommands = config.lsp.commands.map((command) => commandAvailable(command, repoRoot, settings));
+    const lspAvailable = lspCommands.find((candidate) => candidate.available)?.command || null;
+    languages[language] = {
       presentFiles: present,
-      extensions: adapter.extensions,
-      astGrep: ast.available && adapter.astGrep.supported === 'builtin' ? 'available' : 'unavailable',
-      astGrepLanguageId: adapter.astGrep.languageId,
+      extensions: config.extensions,
+      astGrep: ast.available ? 'available' : 'unavailable',
+      astGrepLanguageId: config.astGrep.languageId,
       lsp: lspAvailable ? 'commandDetected' : 'missing',
       lspState: lspAvailable ? 'commandDetected' : 'missing',
       methodVerified: [],
       methodUnsupported: [],
       lspCommand: lspAvailable,
       lspCommands,
-      capabilities: adapter.lsp.capabilities,
-      fallback: adapter.fallback
+      capabilities: config.lsp.capabilities,
+      fallback: settings.fallback
     };
   }
   return {
+    status: 'ok',
     pluginVersion: PLUGIN_VERSION,
-    adapterRegistryVersion: registry.version,
-    repoRoot: path.resolve(repoRoot),
+    settingsVersion: settings.version,
+    settingsSources: settings.sources,
     generatedAt: new Date().toISOString(),
+    repoRoot: path.resolve(repoRoot),
+    inventory,
+    languages,
     tools: {
       astGrep: {
-        command: 'ast-grep',
+        command: settings.astGrep.command,
         available: ast.available,
         version: ast.stdout || ast.stderr || null,
+        configPath: settings.astGrep.configPath || null,
         note: 'Do not use sg alias.'
       }
     },
-    inventory,
-    languages,
     fallbackPolicy: ast.available ? 'Use rg/grep when AST or LSP is unsupported or inconclusive.' : 'Fallback reason: ast-grep executable was not found on PATH. Command policy: this plugin does not call sg.'
   };
 }
 
 export function resolveCapabilityRoute(args = {}) {
   const discovery = discoverCapabilities(args.repoRoot || process.cwd());
-  const language = args.language || (args.file ? adapterForFile(path.resolve(args.repoRoot || process.cwd(), args.file))?.language : null);
+  const settings = loadSettings(args.repoRoot || process.cwd());
+  const language = args.language || (args.file ? languageConfigForFile(path.resolve(args.repoRoot || process.cwd(), args.file), settings).language : null);
   const info = language ? discovery.languages[language] : null;
   if (!info) {
     return { status: 'fallback', language, route: ['rg', 'grep'], fallbackReason: 'unsupported language or missing language hint' };
@@ -406,12 +435,14 @@ export function resolveCapabilityRoute(args = {}) {
   return { status: 'fallback', language, route: ['rg', 'grep'], fallbackReason: 'ast-grep unavailable or unsupported' };
 }
 
-function astUnavailable(language, reason = 'ast-grep executable was not found on PATH') {
+function astUnavailable(language, reason = 'ast-grep executable was not found on PATH', settings = null) {
   return {
     status: 'unavailable',
     language,
     results: [],
-    fallback: ['rg', 'grep'],
+    executable: settings?.astGrep?.command || 'ast-grep',
+    configPath: settings?.astGrep?.configPath || null,
+    fallback: settings?.fallback || ['rg', 'grep'],
     fallbackReason: reason,
     commandPolicy: 'this plugin does not call sg'
   };
@@ -432,34 +463,48 @@ function normalizeAstGrepJson(stdout, language = null) {
 
 export function astGrepSearch(args = {}) {
   const repoRoot = path.resolve(args.repoRoot || process.cwd());
+  const settings = loadSettings(repoRoot);
   const pattern = args.pattern;
   const language = args.language;
-  if (!pattern) return { status: 'error', error: 'pattern is required', results: [], fallback: ['rg', 'grep'] };
-  const registry = loadRegistry();
-  const adapter = language ? adapterForLanguage(language, registry) : null;
-  if (language && !adapter) return astUnavailable(language, `unsupported language: ${language}`);
-  const ast = detectExecutable('ast-grep', ['--version']);
-  if (!ast.available) return astUnavailable(language || 'unknown');
-  const lang = adapter?.astGrep.languageId || language;
-  if (!lang) return { status: 'needs_language', error: 'language is required when path inference is not provided', results: [], fallback: ['rg', 'grep'] };
-  const cmdArgs = ['--pattern', pattern, '--lang', lang, '--json', repoRoot];
-  const result = spawnSync('ast-grep', cmdArgs, { encoding: 'utf8', timeout: args.timeoutMs || 10000, maxBuffer: 10 * 1024 * 1024 });
+  if (!pattern) return { status: 'error', error: 'pattern is required', results: [], fallback: settings.fallback, configPath: settings.astGrep.configPath || null };
+  const { language: resolvedLanguage, config } = language ? languageConfigForLanguage(language, settings) : { language: null, config: null };
+  if (language && !config) return astUnavailable(language, `unsupported language: ${language}`, settings);
+  const ast = detectExecutable(settings.astGrep.command, ['--version']);
+  if (!ast.available) return astUnavailable(language || 'unknown', `${settings.astGrep.command} executable was not found on PATH`, settings);
+  const lang = config?.astGrep.languageId || language;
+  if (!lang) return { status: 'needs_language', error: 'language is required when path inference is not provided', results: [], fallback: settings.fallback, configPath: settings.astGrep.configPath || null };
+  const cmdArgs = [];
+  if (settings.astGrep.configPath) cmdArgs.push('--config', expandHome(settings.astGrep.configPath));
+  cmdArgs.push('--pattern', pattern, '--lang', lang, '--json', repoRoot);
+  const result = spawnSync(settings.astGrep.command, cmdArgs, { cwd: repoRoot, encoding: 'utf8', timeout: args.timeoutMs || 10000, maxBuffer: 10 * 1024 * 1024 });
   if (result.status !== 0 && !result.stdout) {
     return {
       status: 'error',
-      executable: 'ast-grep',
-      language: lang,
+      executable: settings.astGrep.command,
+      configPath: settings.astGrep.configPath || null,
+      language: resolvedLanguage || language || lang,
+      astGrepLanguageId: lang,
       patternSummary: pattern.slice(0, 120),
       stderrSummary: (result.stderr || result.error?.message || '').trim().slice(0, 1000),
-      fallback: ['rg', 'grep'],
+      fallback: settings.fallback,
       fallbackReason: 'ast-grep failed; revise pattern or use text fallback',
       commandPolicy: 'this plugin does not call sg'
     };
   }
   let results = [];
   try { results = normalizeAstGrepJson(result.stdout, lang).slice(0, args.maxResults || 100); }
-  catch (error) { return { status: 'error', error: `failed to parse ast-grep JSON: ${error.message}`, raw: result.stdout.slice(0, 1000), fallback: ['rg', 'grep'] }; }
-  return { status: 'ok', executable: 'ast-grep', language: lang, patternSummary: pattern.slice(0, 120), results, fallback: results.length ? [] : ['rg', 'grep'], fallbackReason: results.length ? null : 'ast-grep returned no matches; text supplement may be useful' };
+  catch (error) { return { status: 'error', error: `failed to parse ast-grep JSON: ${error.message}`, raw: result.stdout.slice(0, 1000), fallback: settings.fallback, configPath: settings.astGrep.configPath || null }; }
+  return {
+    status: 'ok',
+    executable: settings.astGrep.command,
+    configPath: settings.astGrep.configPath || null,
+    language: resolvedLanguage || language || lang,
+    astGrepLanguageId: lang,
+    patternSummary: pattern.slice(0, 120),
+    results,
+    fallback: results.length ? [] : settings.fallback,
+    fallbackReason: results.length ? null : 'ast-grep returned no matches; text supplement may be useful'
+  };
 }
 
 export function astGrepReplacePreview(args = {}) {
@@ -480,36 +525,45 @@ export function astGrepReplacePreview(args = {}) {
   };
 }
 
-function runtimeFallbackUsed(adapter) {
-  if (adapter?.astGrep?.supported === 'builtin' && detectExecutable('ast-grep', ['--version']).available) {
+function runtimeFallbackUsed(config, settings = null) {
+  if (config?.astGrep?.languageId && detectExecutable(settings?.astGrep?.command || 'ast-grep', ['--version']).available) {
     return 'ast-grep or rg/grep';
   }
   return 'rg/grep';
 }
 
 function lspUnavailable(method, args = {}, reason = 'no LSP server command detected', extra = {}) {
-  const registry = loadRegistry();
-  const adapter = args.language ? adapterForLanguage(args.language, registry) : args.file ? adapterForFile(path.resolve(args.repoRoot || process.cwd(), args.file), registry) : null;
+  const repoRoot = path.resolve(args.repoRoot || process.cwd());
+  const settings = extra.settings || loadSettings(repoRoot);
+  const resolved = args.language
+    ? languageConfigForLanguage(args.language, settings)
+    : args.file
+      ? languageConfigForFile(path.resolve(repoRoot, args.file), settings)
+      : { language: null, config: null };
   return {
     status: 'unavailable',
     method,
-    language: adapter?.language || args.language || null,
+    language: resolved.language || args.language || null,
     command: null,
     stderrSummary: '',
     degradedCapability: method,
-    fallbackUsed: runtimeFallbackUsed(adapter),
+    fallbackUsed: runtimeFallbackUsed(resolved.config, settings),
     fallbackReason: reason,
-    ...extra
+    ...Object.fromEntries(Object.entries(extra).filter(([key]) => key !== 'settings'))
   };
 }
 
 function findLspCommand(args = {}) {
-  const registry = loadRegistry();
   const repoRoot = path.resolve(args.repoRoot || process.cwd());
-  const adapter = args.language ? adapterForLanguage(args.language, registry) : args.file ? adapterForFile(path.resolve(repoRoot, args.file), registry) : null;
-  if (!adapter) return { adapter: null, command: null };
-  const available = adapter.lsp.commands.map((command) => commandAvailable(command, repoRoot)).find((c) => c.available);
-  return { adapter, command: available?.command || null };
+  const settings = loadSettings(repoRoot);
+  const resolved = args.language
+    ? languageConfigForLanguage(args.language, settings)
+    : args.file
+      ? languageConfigForFile(path.resolve(repoRoot, args.file), settings)
+      : { language: null, config: null };
+  if (!resolved.config) return { language: resolved.language, config: null, command: null, settings };
+  const available = resolved.config.lsp.commands.map((command) => commandAvailable(command, repoRoot, settings)).find((candidate) => candidate.available);
+  return { language: resolved.language, config: resolved.config, command: available?.command || null, settings };
 }
 
 function lspFrame(message) {
@@ -690,7 +744,7 @@ export async function runLspRequestAsync(commandLine, adapter, method, args = {}
         command: commandLine,
         error: response.error,
         stderrSummary: state.stderr.toString('utf8').trim().slice(0, 1000),
-        fallbackUsed: runtimeFallbackUsed(adapter),
+        fallbackUsed: runtimeFallbackUsed(adapter, args.settings || null),
         fallbackReason: 'LSP server returned an error'
       };
     }
@@ -739,7 +793,7 @@ export function runLspRequest(commandLine, adapter, method, args = {}) {
     encoding: 'utf8',
     timeout: (workerArgs.timeoutMs || 10000) + 5000,
     maxBuffer: 10 * 1024 * 1024,
-    env: process.env
+    env: envWithExtraPathDirs(process.env, workerArgs.settingsPathExtraDirs)
   });
   if (worker.status === 0 && worker.stdout) {
     try { return JSON.parse(worker.stdout); } catch {}
@@ -752,10 +806,11 @@ export function runLspRequest(commandLine, adapter, method, args = {}) {
 }
 
 export function lspTool(method, args = {}) {
-  const { adapter, command } = findLspCommand(args);
-  if (!adapter) return lspUnavailable(method, args, 'unsupported language or file extension');
-  if (!command) return lspUnavailable(method, { ...args, language: adapter.language }, 'LSP command missing');
-  return runLspRequest(command, adapter, method, args);
+  const { language, config, command, settings } = findLspCommand(args);
+  if (!config) return lspUnavailable(method, args, 'unsupported language or file extension', { settings });
+  const adapter = { language, ...config };
+  if (!command) return lspUnavailable(method, { ...args, language }, 'LSP command missing', { settings });
+  return runLspRequest(command, adapter, method, { ...args, settingsPathExtraDirs: settings.path.extraDirs });
 }
 
 export function callTool(name, args = {}) {
