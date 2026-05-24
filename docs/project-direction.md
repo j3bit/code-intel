@@ -42,8 +42,9 @@ The plugin should remain standalone and behavior-first:
    search, navigation, references, rename, rewrite, diagnostics, and audits.
 3. **Optional hook layer** — provides short deterministic nudges for structural
    intent, text-search detours, manual replacements, and post-edit checks.
-4. **Adapter and reporting layer** — keeps language support declarative and
-   writes durable capability evidence for future turns.
+4. **Settings and reporting layer** — keeps language coverage declarative in
+   settings defaults/schema and writes durable capability evidence for future
+   turns.
 
 Hooks may improve routing, but the MCP server and skills must remain useful when
 hooks are absent. Generated routing profiles are hints, not authority; live tool
@@ -57,7 +58,7 @@ The project should keep the following capabilities first-class:
    `ast-grep`, LSP command candidates, method-readiness evidence, and fallback
    status.
 2. **Structural search** — use `ast_grep_search` for parseable AST patterns when
-   the language is supported.
+   effective settings define an ast-grep language id for the language.
 3. **Semantic navigation** — use LSP for definitions, references, symbols, and
    diagnostics only when the server interaction proves method readiness.
 4. **Safe refactor previews** — expose rename and rewrite intent as preview
@@ -70,9 +71,10 @@ The project should keep the following capabilities first-class:
 Every user-visible route should be explicit about the path used and the fallback
 reason when degraded.
 
-- **Structural search:** try AST search for supported languages; supplement with
-  `rg`/`grep` for strings, filenames, logs, generated files, unsupported
-  languages, incomplete AST output, or confirmation.
+- **Structural search:** try AST search when effective settings define an
+  ast-grep language id; supplement with `rg`/`grep` for strings, filenames,
+  logs, generated files, unsupported languages, incomplete AST output, or
+  confirmation.
 - **Semantic navigation:** try LSP definitions, references, symbols, and
   diagnostics when a server interaction verifies the requested method; otherwise
   degrade to AST search when structurally expressible, then text fallback.
@@ -81,9 +83,10 @@ reason when degraded.
   rewrites; otherwise use normal manual edits plus text/structural audits.
 - **Post-edit validation:** after normal edits, prefer LSP diagnostics when
   available and use AST/text audits when diagnostics are missing or inconclusive.
-- **Stale profiles:** treat repo-root mismatch, plugin or adapter-version drift,
-  missing timestamps, and major language-inventory mismatches as stale-profile
-  signals; use live evidence and suggest refreshing with `init-code-intel`.
+- **Stale profiles:** treat repo-root mismatch, plugin version drift, settings
+  source/version drift, missing timestamps, and major language-inventory
+  mismatches as stale-profile signals; use live evidence and suggest refreshing
+  with `init-code-intel`.
 
 ## Capability and Reporting Contracts
 
@@ -101,18 +104,18 @@ missing tools, validated methods, degraded capabilities, fallback routes, and wh
 fallback was used. Reports must remain concise enough for future agents to read
 quickly.
 
-Language adapters should declare:
+Language capability settings should declare:
 
-- language id and file extensions,
-- `ast-grep` language id and support status,
+- language ids and file extensions,
+- `ast-grep` language ids,
 - LSP command candidates,
-- supported LSP capabilities,
-- fallback policy,
-- fixture expectations for success and degraded operation.
+- declared LSP capabilities,
+- fallback commands,
+- user and project override precedence through the settings contract.
 
-Keep adapters declarative until a language clearly needs deeper integration.
-When deeper integration becomes necessary, add fixtures and validation before
-broadening user-facing behavior.
+Keep `settings/defaults.json` declarative and validate it against
+`settings/schema.json`. When a language needs deeper behavior, add fixtures and
+validation before broadening user-facing routes.
 
 ## Validation Bar
 
@@ -120,8 +123,8 @@ Validation should prove behavior, not only file presence.
 
 Required validation surfaces:
 
-- **Plugin structure:** manifest, skills, MCP registration, adapter schema,
-  registry, references, executable scripts, and hook manifest.
+- **Plugin structure:** manifest, skills, MCP registration, settings defaults,
+  settings schema, references, executable scripts, and hook manifest.
 - **MCP contract:** server startup, framed initialize, tool listing, stable tool
   schemas, clean unavailable responses, and non-mutating preview tools.
 - **AST behavior:** `ast-grep` detection, built-in-language smoke search,
@@ -154,8 +157,8 @@ when they can be kept deterministic and dependency-light.
   has been proven.
 - Add fixtures before broadening behavior; every new route should have validation
   for success and degraded operation.
-- Favor small reliable language coverage over a broad but unreliable adapter
-  registry.
+- Favor small reliable language coverage over broad but unreliable settings
+  coverage.
 
 ## Roadmap Priorities
 
@@ -163,7 +166,8 @@ when they can be kept deterministic and dependency-light.
 
 Strengthen MCP framing, LSP lifecycle handling, path safety, timeout behavior,
 and degraded responses before adding many languages. A small set of reliable
-adapters is more valuable than a broad but unreliable registry.
+settings-backed language definitions is more valuable than broad but unreliable
+coverage.
 
 ### 2. Honest Preview Workflows
 
@@ -177,11 +181,12 @@ Make `init-code-intel` produce concise, durable reports that help future agents
 choose the right route quickly: supported languages, known missing tools,
 validated methods, stale-profile signals, and recommended fallback commands.
 
-### 4. Language Adapter Expansion
+### 4. Language Settings Expansion
 
-Add languages through adapter contracts, fixtures, and validation gates. Each
-adapter should document file extensions, AST support, LSP command candidates,
-capabilities, fallback behavior, and fixture expectations.
+Add languages through `settings/defaults.json`, `settings/schema.json`,
+`references/settings-contract.md`, fixtures, and validation gates. Each language
+definition should document file extensions, ast-grep language id, LSP command
+candidates, capabilities, fallback behavior, and fixture expectations.
 
 ### 5. Refactor Guidance
 

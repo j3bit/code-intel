@@ -5,7 +5,7 @@ Use `code-intel` when the user asks for code structure, symbols, definitions, re
 ## Route order
 
 1. Use LSP when the task needs semantic answers and an initialized server is available.
-2. Use `ast-grep` when the task is structurally expressible and the language adapter supports built-in AST search.
+2. Use `ast-grep` when the task is structurally expressible and the effective settings define an ast-grep language id for that language.
 3. Supplement with `rg` or `grep` for strings, logs, filenames, generated files, unsupported languages, incomplete AST output, or confirmation.
 4. Report the route used and any fallback reason.
 

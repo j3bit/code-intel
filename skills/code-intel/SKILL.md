@@ -12,7 +12,7 @@ Use this skill for codebase questions involving declarations, patterns, API usag
 1. Check `docs/code-intel/routing-profile.json` when present.
 2. Treat the profile as a cache, not authority. If it is missing, stale, or contradicted by live tool failures, use live discovery and suggest `init-code-intel`.
 3. Prefer LSP tools for semantic navigation and diagnostics only when the tool response verifies the method; a detected command alone is degraded evidence.
-4. Prefer `ast_grep_search` for structural patterns when the adapter supports built-in AST search.
+4. Prefer `ast_grep_search` for structural patterns when the effective code-intel settings define an ast-grep language id.
 5. Use `rg`/`grep` fallback for strings, filenames, logs, generated files, unsupported languages, missing tools, or inconclusive code-intel output.
 6. Report the route and fallback reason.
 

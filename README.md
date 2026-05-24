@@ -6,7 +6,7 @@ The MVP ships:
 
 - Codex skills for everyday routing, initialization, doctor troubleshooting, and refactor gates.
 - A Node-based MCP server using only built-in Node modules.
-- An adapter registry for AST/LSP capability discovery.
+- Zero-config settings for AST/LSP capability discovery, with optional user and project overrides.
 - Optional soft hooks that nudge but never block agent behavior.
 - Validation scripts and fixture repositories.
 

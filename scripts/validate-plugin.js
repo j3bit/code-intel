@@ -4,12 +4,12 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { tools, callTool, loadRegistry, splitCommandLine } from '../mcp/code-intel-server/core.js';
+import { tools, callTool, loadSettings, validateSettings, splitCommandLine } from '../mcp/code-intel-server/core.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const EXPECTED_TOOLS = ['capability_discover','ast_grep_search','ast_grep_replace_preview','lsp_diagnostics','lsp_symbols','lsp_goto_definition','lsp_find_references','lsp_prepare_rename','lsp_rename_preview'];
 const SKILLS = ['code-intel','init-code-intel','code-intel-doctor','code-intel-refactor'];
-const REFS = ['routing-policy.md','language-adapter-contract.md','fallback-policy.md','mcp-tool-contract.md','hook-contract.md'];
+const REFS = ['routing-policy.md','settings-contract.md','fallback-policy.md','mcp-tool-contract.md','hook-contract.md'];
 const results = [];
 function check(name, ok, evidence = '') { results.push({ name, ok: Boolean(ok), evidence: String(evidence) }); }
 function exists(rel) { return fs.existsSync(path.join(ROOT, rel)); }
@@ -70,6 +70,10 @@ function framedEvidence(result) {
 function mcpManifestServer() {
   return readJson('.mcp.json').mcpServers?.['code-intel'];
 }
+function resolvedManifestCwd(server, manifestDir = ROOT) {
+  if (!server?.cwd) return manifestDir;
+  return path.isAbsolute(server.cwd) ? server.cwd : path.resolve(manifestDir, server.cwd);
+}
 function finish() {
   const failed = results.filter((r) => !r.ok);
   const report = { status: failed.length ? 'failed' : 'passed', total: results.length, passed: results.length - failed.length, failed: failed.length, results };
@@ -95,32 +99,182 @@ for (const skill of SKILLS) {
   check(`skill ${skill} frontmatter parseable`, !error, error || relPath);
 }
 for (const ref of REFS) check(`reference ${ref} exists`, exists(`references/${ref}`), `references/${ref}`);
-check('adapter schema exists', exists('adapters/schema.json'), 'adapters/schema.json');
-check('adapter registry exists', exists('adapters/registry.json'), 'adapters/registry.json');
-let registry;
+check('settings schema exists', exists('settings/schema.json'), 'settings/schema.json');
+check('default settings exists', exists('settings/defaults.json'), 'settings/defaults.json');
+let defaultSettings;
 try {
-  registry = loadRegistry();
+  defaultSettings = readJson('settings/defaults.json');
+  validateSettings(defaultSettings);
+  check('default settings validate against settings/schema.json', true, 'settings/defaults.json');
 } catch (error) {
-  check('registry validates against adapters/schema.json', false, error.message);
+  check('default settings validate against settings/schema.json', false, error.message);
   finish();
 }
-check('registry has version and adapters', Boolean(registry.version && Array.isArray(registry.adapters) && registry.adapters.length), registry.version);
-check('registry validates against adapters/schema.json', true, 'loadRegistry completed schema-backed validation');
-for (const adapter of registry.adapters) {
-  check(`adapter ${adapter.language} shape`, Boolean(adapter.language && adapter.extensions?.length && adapter.astGrep?.languageId && adapter.lsp && adapter.fallback?.length && adapter.fixtures), JSON.stringify(adapter));
+check('default settings include python language', Boolean(defaultSettings.languages?.python?.lsp?.commands?.length), JSON.stringify(defaultSettings.languages?.python || {}));
+check('default settings include typescript language', Boolean(defaultSettings.languages?.typescript?.lsp?.commands?.length), JSON.stringify(defaultSettings.languages?.typescript || {}));
+check('default settings command policy uses ast-grep', defaultSettings.astGrep?.command === 'ast-grep', defaultSettings.astGrep?.command);
+const settingsMergeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-settings-merge-'));
+try {
+  const userSettingsPath = path.join(settingsMergeRoot, 'user-settings.json');
+  const projectRoot = path.join(settingsMergeRoot, 'repo');
+  const projectSettingsDir = path.join(projectRoot, '.code-intel');
+  fs.mkdirSync(projectSettingsDir, { recursive: true });
+  writeJson(userSettingsPath, {
+    version: 1,
+    path: { extraDirs: [path.join(settingsMergeRoot, 'user-bin')] },
+    astGrep: { configPath: path.join(settingsMergeRoot, 'user-sgconfig.yml') },
+    languages: {
+      python: { lsp: { commands: ['user-pyright --stdio'] } },
+      systemverilog: {
+        extensions: ['.sv', '.svh'],
+        astGrep: { languageId: 'systemverilog' },
+        lsp: { commands: ['slangd'], capabilities: ['definition', 'diagnostics', 'symbols'] }
+      }
+    }
+  });
+  writeJson(path.join(projectSettingsDir, 'settings.json'), {
+    version: 1,
+    languages: {
+      python: { lsp: { commands: ['project-pyright --stdio'] } }
+    }
+  });
+  const merged = loadSettings(projectRoot, { userSettingsPath });
+  check('settings merge uses user scope custom language', Boolean(merged.languages.systemverilog), JSON.stringify(merged.languages.systemverilog || {}));
+  check('settings merge lets project override user LSP command', merged.languages.python.lsp.commands[0] === 'project-pyright --stdio', JSON.stringify(merged.languages.python.lsp.commands));
+  check('settings merge preserves default python extensions', merged.languages.python.extensions.includes('.py'), JSON.stringify(merged.languages.python));
+  check('settings merge records source paths', merged.sources.user === userSettingsPath && merged.sources.project.endsWith('.code-intel/settings.json'), JSON.stringify(merged.sources));
+} finally {
+  fs.rmSync(settingsMergeRoot, { recursive: true, force: true });
+}
+const malformedSettingsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-malformed-settings-'));
+try {
+  const userSettingsPath = path.join(malformedSettingsRoot, 'user-settings.json');
+  const projectRoot = path.join(malformedSettingsRoot, 'repo');
+  fs.mkdirSync(projectRoot, { recursive: true });
+  writeJson(userSettingsPath, []);
+  try {
+    loadSettings(projectRoot, { userSettingsPath });
+    check('settings rejects non-object user settings root', false, 'non-object user settings root was accepted');
+  } catch (error) {
+    check(
+      'settings rejects non-object user settings root',
+      /settings schema|user settings root|expected object/.test(error.message),
+      error.message
+    );
+  }
+} finally {
+  fs.rmSync(malformedSettingsRoot, { recursive: true, force: true });
 }
 if (!process.env.CODE_INTEL_EXPECT_VALIDATION_FAILURE) {
-  const malformedRegistryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-bad-registry-'));
+  const malformedDefaultSettingsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-bad-settings-'));
   try {
-    writeJson(path.join(malformedRegistryRoot, 'bad-registry.json'), { version: 'bad', adapters: [{ language: 'bad' }] });
-    const badRegistryRun = run('node', ['scripts/validate-plugin.js', '--json'], {
-      env: { ...process.env, CODE_INTEL_REGISTRY_PATH: path.join(malformedRegistryRoot, 'bad-registry.json'), CODE_INTEL_EXPECT_VALIDATION_FAILURE: '1' }
+    const badSettingsPath = path.join(malformedDefaultSettingsRoot, 'bad-settings.json');
+    writeJson(badSettingsPath, { version: 1, astGrep: { command: 'sg' } });
+    const badSettingsRun = run('node', ['scripts/validate-plugin.js', '--json'], {
+      env: {
+        ...process.env,
+        CODE_INTEL_DEFAULT_SETTINGS_PATH: badSettingsPath,
+        CODE_INTEL_USER_SETTINGS_PATH: path.join(malformedDefaultSettingsRoot, 'missing-user-settings.json'),
+        CODE_INTEL_PROJECT_SETTINGS_PATH: path.join(malformedDefaultSettingsRoot, 'missing-project-settings.json'),
+        CODE_INTEL_EXPECT_VALIDATION_FAILURE: '1'
+      }
     });
-    const badRegistryEvidence = `${badRegistryRun.stdout}\n${badRegistryRun.stderr}`;
-    check('registry schema validation rejects malformed registry', badRegistryRun.status !== 0 && badRegistryEvidence.includes('schema'), badRegistryEvidence.slice(0, 500));
+    const badSettingsEvidence = `${badSettingsRun.stdout}\n${badSettingsRun.stderr}`;
+    check(
+      'settings schema validation rejects malformed settings',
+      badSettingsRun.status !== 0 && badSettingsEvidence.includes('settings schema'),
+      badSettingsEvidence.slice(0, 500)
+    );
   } finally {
-    fs.rmSync(malformedRegistryRoot, { recursive: true, force: true });
+    fs.rmSync(malformedDefaultSettingsRoot, { recursive: true, force: true });
   }
+}
+const settingsExpansionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-settings-expansion-'));
+const originalHome = process.env.HOME;
+const originalUserProfile = process.env.USERPROFILE;
+try {
+  const fakeHome = path.join(settingsExpansionRoot, 'home');
+  const userSettingsPath = path.join(settingsExpansionRoot, 'user-settings.json');
+  const projectRoot = path.join(settingsExpansionRoot, 'repo');
+  fs.mkdirSync(projectRoot, { recursive: true });
+  process.env.HOME = fakeHome;
+  writeJson(userSettingsPath, {
+    version: 1,
+    path: { extraDirs: ['~/code-intel-bin'] },
+    astGrep: { configPath: '~/.codex/code-intel/sgconfig.yml' }
+  });
+  const expanded = loadSettings(projectRoot, { userSettingsPath });
+  check(
+    'settings expands home in ast-grep config path',
+    expanded.astGrep.configPath === path.join(fakeHome, '.codex', 'code-intel', 'sgconfig.yml'),
+    expanded.astGrep.configPath
+  );
+  check(
+    'settings expands home in path extraDirs',
+    expanded.path.extraDirs[0] === path.join(fakeHome, 'code-intel-bin'),
+    JSON.stringify(expanded.path.extraDirs)
+  );
+} finally {
+  if (originalHome === undefined) delete process.env.HOME;
+  else process.env.HOME = originalHome;
+  if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = originalUserProfile;
+  fs.rmSync(settingsExpansionRoot, { recursive: true, force: true });
+}
+const settingsHomeFallbackRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-settings-home-fallback-'));
+try {
+  const fakeUserProfile = path.join(settingsHomeFallbackRoot, 'profile');
+  const maliciousCwd = path.join(settingsHomeFallbackRoot, 'cwd');
+  const projectRoot = path.join(settingsHomeFallbackRoot, 'repo');
+  const profileSettingsPath = path.join(fakeUserProfile, '.codex', 'code-intel', 'settings.json');
+  const cwdSettingsPath = path.join(maliciousCwd, '.codex', 'code-intel', 'settings.json');
+  const childScriptPath = path.join(settingsHomeFallbackRoot, 'check-home-fallback.mjs');
+  fs.mkdirSync(path.dirname(profileSettingsPath), { recursive: true });
+  fs.mkdirSync(path.dirname(cwdSettingsPath), { recursive: true });
+  fs.mkdirSync(projectRoot, { recursive: true });
+  writeJson(profileSettingsPath, {
+    version: 1,
+    path: { extraDirs: ['~/code-intel-bin'] },
+    astGrep: { command: 'profile-ast-grep' }
+  });
+  writeJson(cwdSettingsPath, {
+    version: 1,
+    astGrep: { command: 'cwd-relative-ast-grep' }
+  });
+  fs.writeFileSync(childScriptPath, [
+    `import { loadSettings } from ${JSON.stringify(pathToFileURL(path.join(ROOT, 'mcp/code-intel-server/core.js')).href)};`,
+    'const settings = loadSettings(process.argv[2]);',
+    'console.log(JSON.stringify({ command: settings.astGrep.command, extraDir: settings.path.extraDirs[0], sources: settings.sources }));'
+  ].join('\n'));
+  const childEnv = { ...process.env, USERPROFILE: fakeUserProfile };
+  delete childEnv.HOME;
+  delete childEnv.CODE_INTEL_DEFAULT_SETTINGS_PATH;
+  delete childEnv.CODE_INTEL_USER_SETTINGS_PATH;
+  delete childEnv.CODE_INTEL_PROJECT_SETTINGS_PATH;
+  const fallbackRun = run('node', [childScriptPath, projectRoot], { cwd: maliciousCwd, env: childEnv });
+  let fallbackOutput = null;
+  try {
+    fallbackOutput = JSON.parse(fallbackRun.stdout || '{}');
+  } catch {
+    fallbackOutput = null;
+  }
+  check(
+    'settings uses USERPROFILE for default user settings when HOME is unset',
+    fallbackRun.status === 0 && fallbackOutput?.command === 'profile-ast-grep',
+    fallbackRun.stderr || fallbackRun.stdout
+  );
+  check(
+    'settings does not read cwd-relative .codex as user settings when HOME is unset',
+    fallbackRun.status === 0 && fallbackOutput?.sources?.user === profileSettingsPath,
+    JSON.stringify(fallbackOutput)
+  );
+  check(
+    'settings expands home with USERPROFILE when HOME is unset',
+    fallbackRun.status === 0 && fallbackOutput?.extraDir === path.join(fakeUserProfile, 'code-intel-bin'),
+    JSON.stringify(fallbackOutput)
+  );
+} finally {
+  fs.rmSync(settingsHomeFallbackRoot, { recursive: true, force: true });
 }
 check('scripts executable or documented', ['scripts/init-code-intel.js','scripts/doctor-code-intel.js','scripts/validate-plugin.js'].every((f) => fs.statSync(path.join(ROOT, f)).mode & 0o111), 'init/doctor/validate executable');
 
@@ -132,14 +286,17 @@ check('MCP framed initialize works', framedInitializeOk(framedInit), framedEvide
 const mcpServer = mcpManifestServer();
 check('MCP manifest declares code-intel server', Boolean(mcpServer?.command && Array.isArray(mcpServer.args)), JSON.stringify(mcpServer || {}));
 if (mcpServer?.command && Array.isArray(mcpServer.args)) {
+  const manifestText = JSON.stringify(mcpServer);
+  check('MCP manifest avoids checkout-specific absolute paths', !manifestText.includes('/Dev/codex-plugins/code-intel/'), manifestText);
+  check('MCP manifest uses plugin-relative cwd', mcpServer.cwd === '.', JSON.stringify(mcpServer));
   const manifestInit = spawnSync(mcpServer.command, mcpServer.args, {
-    cwd: os.tmpdir(),
+    cwd: resolvedManifestCwd(mcpServer),
     input: initializeFrame(),
     encoding: 'utf8',
     timeout: 5000,
     maxBuffer: 10 * 1024 * 1024
   });
-  check('MCP manifest starts from outside repository cwd', framedInitializeOk(manifestInit), framedEvidence(manifestInit));
+  check('MCP manifest starts with plugin-relative cwd', framedInitializeOk(manifestInit), framedEvidence(manifestInit));
 }
 const unsupportedFramedInit = run(process.execPath, ['mcp/code-intel-server/index.js'], { input: unsupportedInitializeFrame() });
 check(
@@ -155,7 +312,7 @@ try { listed = JSON.parse(list.stdout).tools.map((t) => t.name); } catch {}
 check('tool list includes expected tools', EXPECTED_TOOLS.every((t) => listed.includes(t)), listed.join(', '));
 for (const tool of tools) check(`tool ${tool.name} schema`, Boolean(tool.name && tool.description && tool.inputSchema && tool.outputSchema), tool.description);
 const discover = callTool('capability_discover', { repoRoot: ROOT });
-check('capability_discover works', Boolean(discover.repoRoot && discover.tools?.astGrep?.command === 'ast-grep'), discover.repoRoot);
+check('capability_discover works', Boolean(discover.repoRoot && discover.settingsVersion === 1 && discover.tools?.astGrep?.command === 'ast-grep'), JSON.stringify({ repoRoot: discover.repoRoot, settingsVersion: discover.settingsVersion, astGrep: discover.tools?.astGrep?.command }));
 const windowsPathParts = splitCommandLine(String.raw`C:\Tools\pyright-langserver.cmd --stdio`);
 check(
   'splitCommandLine preserves unquoted Windows path backslashes',
@@ -202,6 +359,131 @@ try {
 } finally {
   fs.rmSync(emptyToolPathRoot, { recursive: true, force: true });
 }
+const extraPathAstRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-extra-path-ast-'));
+try {
+  const emptyPathDir = path.join(extraPathAstRoot, 'empty-path');
+  const extraAstDir = path.join(extraPathAstRoot, 'extra-bin');
+  const astSettingsPath = path.join(extraPathAstRoot, 'settings.json');
+  fs.mkdirSync(emptyPathDir, { recursive: true });
+  fs.mkdirSync(extraAstDir, { recursive: true });
+  const fakeAstGrep = path.join(extraAstDir, 'ast-grep');
+  fs.writeFileSync(fakeAstGrep, `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--version" ]; then
+    echo "ast-grep fake-extra-dir"
+    exit 0
+  fi
+done
+printf '%s\n' '[{"file":"extra.py","text":"fake match","language":"Python"}]'
+`);
+  fs.chmodSync(fakeAstGrep, 0o755);
+  writeJson(astSettingsPath, {
+    version: 1,
+    path: { extraDirs: [extraAstDir] },
+    astGrep: { command: 'ast-grep' }
+  });
+  const extraAstEnv = { ...process.env, PATH: emptyPathDir, CODE_INTEL_PROJECT_SETTINGS_PATH: astSettingsPath };
+  const extraAstDiscoveryProbe = run(process.execPath, ['mcp/code-intel-server/index.js', '--call-tool', 'capability_discover', '--args', JSON.stringify({ repoRoot: path.join(ROOT, 'fixtures/repos/python-basic') })], {
+    env: extraAstEnv
+  });
+  const extraAstDiscovery = JSON.parse(extraAstDiscoveryProbe.stdout || '{}');
+  check(
+    'ast-grep discovery consults settings path extraDirs',
+    extraAstDiscovery.tools?.astGrep?.available === true &&
+      extraAstDiscovery.tools.astGrep.command === 'ast-grep' &&
+      extraAstDiscovery.tools.astGrep.resolvedCommand === fakeAstGrep,
+    extraAstDiscoveryProbe.stdout.slice(0, 800) || extraAstDiscoveryProbe.stderr.slice(0, 800)
+  );
+  const extraAstSearchProbe = run(process.execPath, ['mcp/code-intel-server/index.js', '--call-tool', 'ast_grep_search', '--args', JSON.stringify({ repoRoot: path.join(ROOT, 'fixtures/repos/python-basic'), language: 'python', pattern: 'Greeter()', maxResults: 5 })], {
+    env: extraAstEnv
+  });
+  const extraAstSearch = JSON.parse(extraAstSearchProbe.stdout || '{}');
+  check(
+    'ast-grep search executes command from settings path extraDirs',
+    extraAstSearch.status === 'ok' &&
+      extraAstSearch.executable === 'ast-grep' &&
+      extraAstSearch.resolvedCommand === fakeAstGrep &&
+      extraAstSearch.results?.length === 1,
+    extraAstSearchProbe.stdout.slice(0, 800) || extraAstSearchProbe.stderr.slice(0, 800)
+  );
+  const extraAstFallbackProbe = run(process.execPath, ['mcp/code-intel-server/index.js', '--call-tool', 'lsp_symbols', '--args', JSON.stringify({ repoRoot: ROOT, language: 'json', file: 'package.json' })], {
+    env: extraAstEnv
+  });
+  const extraAstFallback = JSON.parse(extraAstFallbackProbe.stdout || '{}');
+  check(
+    'LSP fallback detection consults ast-grep settings path extraDirs',
+    extraAstFallback.status === 'unavailable' &&
+      extraAstFallback.fallbackUsed === 'ast-grep or rg/grep',
+    extraAstFallbackProbe.stdout.slice(0, 800) || extraAstFallbackProbe.stderr.slice(0, 800)
+  );
+} catch (error) {
+  check('ast-grep discovery consults settings path extraDirs', false, error.message);
+  check('ast-grep search executes command from settings path extraDirs', false, error.message);
+  check('LSP fallback detection consults ast-grep settings path extraDirs', false, error.message);
+} finally {
+  fs.rmSync(extraPathAstRoot, { recursive: true, force: true });
+}
+const relativeExtraPathAstRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-relative-extra-path-ast-'));
+try {
+  const outsideCwd = path.join(relativeExtraPathAstRoot, 'outside-cwd');
+  const targetRepo = path.join(relativeExtraPathAstRoot, 'repo');
+  const repoBin = path.join(targetRepo, 'bin');
+  const projectSettingsDir = path.join(targetRepo, '.code-intel');
+  fs.mkdirSync(outsideCwd, { recursive: true });
+  fs.mkdirSync(repoBin, { recursive: true });
+  fs.mkdirSync(projectSettingsDir, { recursive: true });
+  fs.writeFileSync(path.join(targetRepo, 'extra.py'), 'print("extra")\n');
+  const fakeAstGrep = path.join(repoBin, 'ast-grep');
+  fs.writeFileSync(fakeAstGrep, `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--version" ]; then
+    echo "ast-grep fake-relative-extra-dir"
+    exit 0
+  fi
+done
+printf '%s\n' '[{"file":"extra.py","text":"fake relative match","language":"Python"}]'
+`);
+  fs.chmodSync(fakeAstGrep, 0o755);
+  writeJson(path.join(projectSettingsDir, 'settings.json'), {
+    version: 1,
+    path: { extraDirs: ['./bin'] },
+    astGrep: { command: 'ast-grep' }
+  });
+  const relativeAstEnv = {
+    ...process.env,
+    PATH: path.join(relativeExtraPathAstRoot, 'empty-path'),
+    CODE_INTEL_USER_SETTINGS_PATH: path.join(relativeExtraPathAstRoot, 'missing-user-settings.json')
+  };
+  fs.mkdirSync(relativeAstEnv.PATH, { recursive: true });
+  const relativeAstDiscoveryProbe = run(process.execPath, [path.join(ROOT, 'mcp/code-intel-server/index.js'), '--call-tool', 'capability_discover', '--args', JSON.stringify({ repoRoot: targetRepo })], {
+    cwd: outsideCwd,
+    env: relativeAstEnv
+  });
+  const relativeAstDiscovery = JSON.parse(relativeAstDiscoveryProbe.stdout || '{}');
+  check(
+    'ast-grep discovery resolves relative extraDirs from repoRoot',
+    relativeAstDiscovery.tools?.astGrep?.available === true &&
+      relativeAstDiscovery.tools.astGrep.resolvedCommand === fakeAstGrep,
+    relativeAstDiscoveryProbe.stdout.slice(0, 800) || relativeAstDiscoveryProbe.stderr.slice(0, 800)
+  );
+  const relativeAstSearchProbe = run(process.execPath, [path.join(ROOT, 'mcp/code-intel-server/index.js'), '--call-tool', 'ast_grep_search', '--args', JSON.stringify({ repoRoot: targetRepo, language: 'python', pattern: 'print($A)', maxResults: 5 })], {
+    cwd: outsideCwd,
+    env: relativeAstEnv
+  });
+  const relativeAstSearch = JSON.parse(relativeAstSearchProbe.stdout || '{}');
+  check(
+    'ast-grep search executes relative extraDirs command from repoRoot',
+    relativeAstSearch.status === 'ok' &&
+      relativeAstSearch.resolvedCommand === fakeAstGrep &&
+      relativeAstSearch.results?.length === 1,
+    relativeAstSearchProbe.stdout.slice(0, 800) || relativeAstSearchProbe.stderr.slice(0, 800)
+  );
+} catch (error) {
+  check('ast-grep discovery resolves relative extraDirs from repoRoot', false, error.message);
+  check('ast-grep search executes relative extraDirs command from repoRoot', false, error.message);
+} finally {
+  fs.rmSync(relativeExtraPathAstRoot, { recursive: true, force: true });
+}
 const fakeLspRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-fake-lsp-'));
 try {
   const fakeBinDir = path.join(fakeLspRoot, 'bin');
@@ -215,20 +497,27 @@ if (process.argv.slice(2).includes('--version')) {
 await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-lsp-server.js')).href)});
 `);
   fs.chmodSync(fakeNoVersionLsp, 0o755);
-  const fakeRegistry = {
-    version: 'test-fake-lsp',
-    adapters: [{
-      language: 'typescript',
-      extensions: ['.ts'],
-      astGrep: { languageId: 'typescript', supported: 'builtin' },
-      lsp: { commands: ['fake-no-version-lsp --stdio'], capabilities: ['definition', 'references', 'rename', 'diagnostics', 'symbols'] },
-      fallback: ['rg', 'grep'],
-      fixtures: { repo: 'fixtures/repos/typescript-basic', expectedAst: true, expectedLsp: true }
-    }]
+  const fakeSettingsPath = path.join(fakeLspRoot, 'settings.json');
+  const fakeLspEnv = {
+    ...process.env,
+    PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH || ''}`,
+    CODE_INTEL_DEFAULT_SETTINGS_PATH: fakeSettingsPath,
+    CODE_INTEL_USER_SETTINGS_PATH: path.join(fakeLspRoot, 'missing-user-settings.json'),
+    CODE_INTEL_PROJECT_SETTINGS_PATH: path.join(fakeLspRoot, 'missing-project-settings.json')
   };
-  const fakeRegistryPath = path.join(fakeLspRoot, 'registry.json');
-  const fakeLspEnv = { ...process.env, PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH || ''}`, CODE_INTEL_REGISTRY_PATH: fakeRegistryPath };
-  writeJson(fakeRegistryPath, fakeRegistry);
+  writeJson(fakeSettingsPath, {
+    version: 1,
+    path: { extraDirs: [fakeBinDir] },
+    astGrep: { command: 'ast-grep', configPath: null },
+    fallback: ['rg', 'grep'],
+    languages: {
+      typescript: {
+        extensions: ['.ts'],
+        astGrep: { languageId: 'typescript' },
+        lsp: { commands: ['fake-no-version-lsp --stdio'], capabilities: ['definition', 'references', 'rename', 'diagnostics', 'symbols'] }
+      }
+    }
+  });
   const pathEscapeProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'lsp_symbols', '--args', JSON.stringify({ repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'), language: 'typescript', file: '../python-basic/example.py' })], {
     env: fakeLspEnv
   });
@@ -258,6 +547,66 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
 } finally {
   fs.rmSync(fakeLspRoot, { recursive: true, force: true });
 }
+const extraPathLspRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-extra-path-lsp-'));
+try {
+  const targetRepo = path.join(extraPathLspRoot, 'repo');
+  const extraBinDir = path.join(extraPathLspRoot, 'extra-bin');
+  fs.mkdirSync(path.join(targetRepo, 'src'), { recursive: true });
+  fs.mkdirSync(extraBinDir, { recursive: true });
+  fs.writeFileSync(path.join(targetRepo, 'src', 'math.ts'), 'export function add(a: number, b: number) { return a + b; }\n');
+
+  const extraLsp = path.join(extraBinDir, 'fake-extra-path-lsp');
+  fs.writeFileSync(extraLsp, `#!/usr/bin/env node
+await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-lsp-server.js')).href)});
+`);
+  fs.chmodSync(extraLsp, 0o755);
+
+  const extraSettingsPath = path.join(extraPathLspRoot, 'settings.json');
+  writeJson(extraSettingsPath, {
+    version: 1,
+    path: { extraDirs: [extraBinDir] },
+    astGrep: { command: 'ast-grep', configPath: null },
+    fallback: ['rg', 'grep'],
+    languages: {
+      typescript: {
+        extensions: ['.ts'],
+        astGrep: { languageId: 'typescript' },
+        lsp: { commands: ['fake-extra-path-lsp --stdio'], capabilities: ['symbols'] }
+      }
+    }
+  });
+  const extraEnv = {
+    ...process.env,
+    CODE_INTEL_DEFAULT_SETTINGS_PATH: extraSettingsPath,
+    CODE_INTEL_USER_SETTINGS_PATH: path.join(extraPathLspRoot, 'missing-user-settings.json'),
+    CODE_INTEL_PROJECT_SETTINGS_PATH: path.join(extraPathLspRoot, 'missing-project-settings.json')
+  };
+  const extraDiscoveryProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'capability_discover', '--args', JSON.stringify({ repoRoot: targetRepo })], {
+    env: extraEnv
+  });
+  const extraDiscovery = JSON.parse(extraDiscoveryProbe.stdout || '{}');
+  check(
+    'LSP executable detection consults settings path extraDirs',
+    extraDiscovery.languages?.typescript?.lsp === 'commandDetected' &&
+      extraDiscovery.languages.typescript.lspCommands?.[0]?.executablePath === extraLsp,
+    extraDiscoveryProbe.stdout.slice(0, 800) || extraDiscoveryProbe.stderr.slice(0, 800)
+  );
+
+  const extraLspProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'lsp_symbols', '--args', JSON.stringify({ repoRoot: targetRepo, file: 'src/math.ts' })], {
+    env: extraEnv
+  });
+  const extraLspOutput = JSON.parse(extraLspProbe.stdout || '{}');
+  check(
+    'LSP tools execute commands found through settings path extraDirs',
+    extraLspProbe.status === 0 && extraLspOutput.status === 'ok' && extraLspOutput.lspState === 'methodVerified' && extraLspOutput.language === 'typescript',
+    extraLspProbe.stdout.slice(0, 800) || extraLspProbe.stderr.slice(0, 800)
+  );
+} catch (error) {
+  check('LSP executable detection consults settings path extraDirs', false, error.message);
+  check('LSP tools execute commands found through settings path extraDirs', false, error.message);
+} finally {
+  fs.rmSync(extraPathLspRoot, { recursive: true, force: true });
+}
 const relativeLspRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-relative-lsp-'));
 try {
   const targetRepo = path.join(relativeLspRoot, 'repo');
@@ -272,20 +621,27 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
 `);
   fs.chmodSync(localLsp, 0o755);
 
-  const relativeRegistryPath = path.join(relativeLspRoot, 'registry.json');
-  writeJson(relativeRegistryPath, {
-    version: 'test-relative-lsp',
-    adapters: [{
-      language: 'typescript',
-      extensions: ['.ts'],
-      astGrep: { languageId: 'typescript', supported: 'builtin' },
-      lsp: { commands: ['./node_modules/.bin/fake-relative-lsp --stdio'], capabilities: ['symbols'] },
-      fallback: ['rg', 'grep'],
-      fixtures: { repo: targetRepo, expectedAst: true, expectedLsp: true }
-    }]
+  const relativeSettingsPath = path.join(relativeLspRoot, 'settings.json');
+  writeJson(relativeSettingsPath, {
+    version: 1,
+    path: { extraDirs: [] },
+    astGrep: { command: 'ast-grep', configPath: null },
+    fallback: ['rg', 'grep'],
+    languages: {
+      typescript: {
+        extensions: ['.ts'],
+        astGrep: { languageId: 'typescript' },
+        lsp: { commands: ['./node_modules/.bin/fake-relative-lsp --stdio'], capabilities: ['symbols'] }
+      }
+    }
   });
 
-  const relativeEnv = { ...process.env, CODE_INTEL_REGISTRY_PATH: relativeRegistryPath };
+  const relativeEnv = {
+    ...process.env,
+    CODE_INTEL_DEFAULT_SETTINGS_PATH: relativeSettingsPath,
+    CODE_INTEL_USER_SETTINGS_PATH: path.join(relativeLspRoot, 'missing-user-settings.json'),
+    CODE_INTEL_PROJECT_SETTINGS_PATH: path.join(relativeLspRoot, 'missing-project-settings.json')
+  };
   const relativeDiscoveryProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'capability_discover', '--args', JSON.stringify({ repoRoot: targetRepo })], {
     env: relativeEnv
   });
@@ -312,23 +668,93 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
 } finally {
   fs.rmSync(relativeLspRoot, { recursive: true, force: true });
 }
+const relativeExtraPathLspRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-relative-extra-path-lsp-'));
+try {
+  const outsideCwd = path.join(relativeExtraPathLspRoot, 'outside-cwd');
+  const targetRepo = path.join(relativeExtraPathLspRoot, 'repo');
+  const repoBin = path.join(targetRepo, 'bin');
+  const projectSettingsDir = path.join(targetRepo, '.code-intel');
+  fs.mkdirSync(outsideCwd, { recursive: true });
+  fs.mkdirSync(path.join(targetRepo, 'src'), { recursive: true });
+  fs.mkdirSync(repoBin, { recursive: true });
+  fs.mkdirSync(projectSettingsDir, { recursive: true });
+  fs.writeFileSync(path.join(targetRepo, 'src', 'math.ts'), 'export function add(a: number, b: number) { return a + b; }\n');
+
+  const localLsp = path.join(repoBin, 'fake-local-lsp');
+  fs.writeFileSync(localLsp, `#!/usr/bin/env node
+await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-lsp-server.js')).href)});
+`);
+  fs.chmodSync(localLsp, 0o755);
+
+  writeJson(path.join(projectSettingsDir, 'settings.json'), {
+    version: 1,
+    path: { extraDirs: ['./bin'] },
+    astGrep: { command: 'ast-grep', configPath: null },
+    fallback: ['rg', 'grep'],
+    languages: {
+      typescript: {
+        extensions: ['.ts'],
+        astGrep: { languageId: 'typescript' },
+        lsp: { commands: ['fake-local-lsp --stdio'], capabilities: ['symbols'] }
+      }
+    }
+  });
+
+  const relativeExtraEnv = {
+    ...process.env,
+    CODE_INTEL_USER_SETTINGS_PATH: path.join(relativeExtraPathLspRoot, 'missing-user-settings.json')
+  };
+  const relativeExtraDiscoveryProbe = run(process.execPath, [path.join(ROOT, 'mcp/code-intel-server/index.js'), '--call-tool', 'capability_discover', '--args', JSON.stringify({ repoRoot: targetRepo })], {
+    cwd: outsideCwd,
+    env: relativeExtraEnv
+  });
+  const relativeExtraDiscovery = JSON.parse(relativeExtraDiscoveryProbe.stdout || '{}');
+  check(
+    'LSP executable detection resolves relative extraDirs from repoRoot',
+    relativeExtraDiscovery.languages?.typescript?.lsp === 'commandDetected' &&
+      relativeExtraDiscovery.languages.typescript.lspCommands?.[0]?.executablePath === localLsp,
+    relativeExtraDiscoveryProbe.stdout.slice(0, 800) || relativeExtraDiscoveryProbe.stderr.slice(0, 800)
+  );
+
+  const relativeExtraLspProbe = run(process.execPath, [path.join(ROOT, 'mcp/code-intel-server/index.js'), '--call-tool', 'lsp_symbols', '--args', JSON.stringify({ repoRoot: targetRepo, file: 'src/math.ts' })], {
+    cwd: outsideCwd,
+    env: relativeExtraEnv
+  });
+  const relativeExtraLspOutput = JSON.parse(relativeExtraLspProbe.stdout || '{}');
+  check(
+    'LSP tools execute relative extraDirs command from repoRoot',
+    relativeExtraLspProbe.status === 0 && relativeExtraLspOutput.status === 'ok' && relativeExtraLspOutput.lspState === 'methodVerified',
+    relativeExtraLspProbe.stdout.slice(0, 800) || relativeExtraLspProbe.stderr.slice(0, 800)
+  );
+} catch (error) {
+  check('LSP executable detection resolves relative extraDirs from repoRoot', false, error.message);
+  check('LSP tools execute relative extraDirs command from repoRoot', false, error.message);
+} finally {
+  fs.rmSync(relativeExtraPathLspRoot, { recursive: true, force: true });
+}
 const strictLspRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-strict-lsp-'));
 try {
-  const strictRegistry = {
-    version: 'test-strict-lsp',
-    adapters: [{
-      language: 'typescript',
-      extensions: ['.ts'],
-      astGrep: { languageId: 'typescript', supported: 'builtin' },
-      lsp: { commands: [`node "${path.join(ROOT, 'fixtures/lsp/strict-init-lsp-server.js')}"`], capabilities: ['definition', 'references', 'rename', 'diagnostics', 'symbols'] },
-      fallback: ['rg', 'grep'],
-      fixtures: { repo: 'fixtures/repos/typescript-basic', expectedAst: true, expectedLsp: true }
-    }]
-  };
-  const strictRegistryPath = path.join(strictLspRoot, 'registry.json');
-  writeJson(strictRegistryPath, strictRegistry);
+  const strictSettingsPath = path.join(strictLspRoot, 'settings.json');
+  writeJson(strictSettingsPath, {
+    version: 1,
+    path: { extraDirs: [] },
+    astGrep: { command: 'ast-grep', configPath: null },
+    fallback: ['rg', 'grep'],
+    languages: {
+      typescript: {
+        extensions: ['.ts'],
+        astGrep: { languageId: 'typescript' },
+        lsp: { commands: [`node "${path.join(ROOT, 'fixtures/lsp/strict-init-lsp-server.js')}"`], capabilities: ['definition', 'references', 'rename', 'diagnostics', 'symbols'] }
+      }
+    }
+  });
   const strictProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'lsp_symbols', '--args', JSON.stringify({ repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'), file: 'src/math.ts', timeoutMs: 5000 })], {
-    env: { ...process.env, CODE_INTEL_REGISTRY_PATH: strictRegistryPath }
+    env: {
+      ...process.env,
+      CODE_INTEL_DEFAULT_SETTINGS_PATH: strictSettingsPath,
+      CODE_INTEL_USER_SETTINGS_PATH: path.join(strictLspRoot, 'missing-user-settings.json'),
+      CODE_INTEL_PROJECT_SETTINGS_PATH: path.join(strictLspRoot, 'missing-project-settings.json')
+    }
   });
   const strictOutput = JSON.parse(strictProbe.stdout || '{}');
   check(
@@ -391,6 +817,10 @@ try {
     check(`init ${fixture} succeeds twice`, first.status === 0 && second.status === 0, (first.stderr || second.stderr || '').slice(0, 300));
     for (const report of ['capability-report.md','routing-profile.json','validation-report.md']) check(`init ${fixture} writes ${report}`, fs.existsSync(path.join(fixtureRoot, 'docs/code-intel', report)), report);
     const profile = JSON.parse(fs.readFileSync(path.join(fixtureRoot, 'docs/code-intel/routing-profile.json'), 'utf8'));
+    check(`init ${fixture} records settings version`, Boolean(profile.settingsVersion), String(profile.settingsVersion));
+    check(`init ${fixture} records settings sources`, Boolean(profile.settingsSources), JSON.stringify(profile.settingsSources));
+    const retiredProfileVersionField = ['ad', 'apter', 'Reg', 'istryVersion'].join('');
+    check(`init ${fixture} omits retired capability version`, !Object.hasOwn(profile, retiredProfileVersionField), JSON.stringify({ [retiredProfileVersionField]: profile[retiredProfileVersionField] }));
     check(`init ${fixture} records ast-grep command`, profile.tools.astGrep.command === 'ast-grep', profile.tools.astGrep.command);
     check(`init ${fixture} records per-language ast-grep smoke`, Object.values(profile.languages || {}).every((language) => language.astGrepSmoke && ['passed','skipped','failed'].includes(language.astGrepSmoke.status)), JSON.stringify(profile.languages));
     check(`init ${fixture} records optional LSP initialize smoke`, Object.values(profile.languages || {}).every((language) => language.lspInitializeSmoke && ['passed','skipped','failed'].includes(language.lspInitializeSmoke.status)), JSON.stringify(profile.languages));
@@ -398,6 +828,76 @@ try {
   }
 } finally {
   fs.rmSync(initTmpRoot, { recursive: true, force: true });
+}
+const initAstSettingsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-init-ast-settings-'));
+try {
+  const emptyPathDir = path.join(initAstSettingsRoot, 'empty-path');
+  const extraAstDir = path.join(initAstSettingsRoot, 'extra-bin');
+  const repoRoot = path.join(initAstSettingsRoot, 'repo');
+  const projectSettingsDir = path.join(repoRoot, '.code-intel');
+  fs.mkdirSync(emptyPathDir, { recursive: true });
+  fs.mkdirSync(extraAstDir, { recursive: true });
+  fs.mkdirSync(projectSettingsDir, { recursive: true });
+  fs.cpSync(path.join(ROOT, 'fixtures/repos/python-basic'), repoRoot, { recursive: true });
+  const fakeAstGrep = path.join(extraAstDir, 'ast-grep');
+  fs.writeFileSync(fakeAstGrep, `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--version" ]; then
+    echo "ast-grep fake-init-extra-dir"
+    exit 0
+  fi
+done
+printf '%s\n' '[{"file":"example.py","text":"fake init smoke","language":"Python"}]'
+`);
+  fs.chmodSync(fakeAstGrep, 0o755);
+  writeJson(path.join(projectSettingsDir, 'settings.json'), {
+    version: 1,
+    path: { extraDirs: [extraAstDir] },
+    astGrep: { command: 'ast-grep' }
+  });
+  const initRun = run(process.execPath, ['scripts/init-code-intel.js', '--repo', repoRoot, '--json'], {
+    env: { ...process.env, PATH: emptyPathDir }
+  });
+  const profile = JSON.parse(fs.readFileSync(path.join(repoRoot, 'docs/code-intel/routing-profile.json'), 'utf8'));
+  check(
+    'init ast-grep smoke uses effective settings command path',
+    initRun.status === 0 &&
+      profile.tools?.astGrep?.resolvedCommand === fakeAstGrep &&
+      profile.languages?.python?.astGrepSmoke?.status === 'passed' &&
+      profile.languages.python.astGrepSmoke.resolvedCommand === fakeAstGrep,
+    initRun.stderr || JSON.stringify(profile.languages?.python?.astGrepSmoke || {})
+  );
+} catch (error) {
+  check('init ast-grep smoke uses effective settings command path', false, error.message);
+} finally {
+  fs.rmSync(initAstSettingsRoot, { recursive: true, force: true });
+}
+const freshDoctorTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-fresh-doctor-'));
+try {
+  fs.cpSync(path.join(ROOT, 'fixtures/repos/typescript-basic'), freshDoctorTmpRoot, { recursive: true });
+  const initRun = run('node', ['scripts/init-code-intel.js', '--repo', freshDoctorTmpRoot, '--json']);
+  const doctorRun = run('node', ['scripts/doctor-code-intel.js', '--repo', freshDoctorTmpRoot, '--json']);
+  const doctor = JSON.parse(doctorRun.stdout || '{}');
+  const reasons = (doctor.findings || []).map((finding) => finding.reason);
+  check('fresh init then doctor does not report generated report inventory mismatch', initRun.status === 0 && doctorRun.status === 0 && !reasons.includes('language inventory major mismatch'), reasons.join(' | '));
+
+  const profilePath = path.join(freshDoctorTmpRoot, 'docs/code-intel/routing-profile.json');
+  const profile = JSON.parse(fs.readFileSync(profilePath, 'utf8'));
+  profile.settingsSources = { project: profile.settingsSources.project, user: profile.settingsSources.user, default: profile.settingsSources.default };
+  writeJson(profilePath, profile);
+  const reorderedRun = run('node', ['scripts/doctor-code-intel.js', '--repo', freshDoctorTmpRoot, '--json']);
+  const reorderedDoctor = JSON.parse(reorderedRun.stdout || '{}');
+  const reorderedReasons = (reorderedDoctor.findings || []).map((finding) => finding.reason);
+  check('doctor treats reordered settings sources as equivalent', reorderedRun.status === 0 && !reorderedReasons.includes('settings source differs'), reorderedReasons.join(' | '));
+
+  profile.settingsSources = { ...profile.settingsSources, default: 'stale-settings-source' };
+  writeJson(profilePath, profile);
+  const changedRun = run('node', ['scripts/doctor-code-intel.js', '--repo', freshDoctorTmpRoot, '--json']);
+  const changedDoctor = JSON.parse(changedRun.stdout || '{}');
+  const changedReasons = (changedDoctor.findings || []).map((finding) => finding.reason);
+  check('doctor detects changed settings source', changedRun.status === 0 && changedReasons.includes('settings source differs'), changedReasons.join(' | '));
+} finally {
+  fs.rmSync(freshDoctorTmpRoot, { recursive: true, force: true });
 }
 const staleTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-stale-profile-'));
 try {
@@ -408,7 +908,8 @@ try {
     repoRoot: staleTmpRoot,
     generatedAt: '2020-01-01T00:00:00.000Z',
     pluginVersion: '0.0.0-stale',
-    adapterRegistryVersion: '0.0.0-stale',
+    settingsVersion: 0,
+    settingsSources: { default: 'stale', user: null, project: null },
     tools: { astGrep: { command: 'ast-grep', available: true } },
     languages: {},
     inventory: { totalFiles: 0, languages: {} }
@@ -416,7 +917,7 @@ try {
   const doctorRun = run('node', ['scripts/doctor-code-intel.js', '--repo', staleTmpRoot, '--json']);
   const doctor = JSON.parse(doctorRun.stdout || '{}');
   const reasons = (doctor.findings || []).map((finding) => finding.reason).join(' | ');
-  check('doctor detects stale routing profile version and inventory mismatch', reasons.includes('plugin version differs') && reasons.includes('adapter registry version differs') && reasons.includes('language inventory major mismatch'), reasons);
+  check('doctor detects stale routing profile version and inventory mismatch', reasons.includes('plugin version differs') && reasons.includes('settings version differs') && reasons.includes('settings source differs') && reasons.includes('language inventory major mismatch'), reasons);
   fs.writeFileSync(path.join(staleDocs, 'routing-profile.json'), '{bad json');
   const corruptDoctorRun = run('node', ['scripts/doctor-code-intel.js', '--repo', staleTmpRoot, '--json']);
   const corruptDoctor = JSON.parse(corruptDoctorRun.stdout || '{}');
@@ -524,7 +1025,7 @@ for (const [name, expectation] of behavior) check(`behavior documented: ${name}`
 
 // No forbidden command path in executable/config surfaces.
 const scanFiles = [];
-for (const dir of ['scripts','hooks','adapters','mcp']) {
+for (const dir of ['scripts','hooks','settings','mcp']) {
   const stack = [path.join(ROOT, dir)];
   while (stack.length) {
     const item = stack.pop();
@@ -537,6 +1038,33 @@ for (const dir of ['scripts','hooks','adapters','mcp']) {
 }
 const commandCallPattern = /(?:spawnSync|spawn|execFile|exec)\s*\(\s*['"]sg['"]|"command"\s*:\s*"sg"/;
 const offenders = scanFiles.filter((file) => commandCallPattern.test(fs.readFileSync(file, 'utf8'))).map(rel);
-check('no script hook registry or MCP path calls forbidden shorthand command', offenders.length === 0, offenders.join(', ') || 'none');
+check('no script hook settings or MCP path calls forbidden shorthand command', offenders.length === 0, offenders.join(', ') || 'none');
+
+const retiredTerms = [
+  ['ad', 'apter'].join(''),
+  ['reg', 'istry'].join(''),
+  'CODE_INTEL_' + ['REG', 'ISTRY'].join('') + '_PATH',
+  ['ad', 'apters/'].join('')
+];
+const activeSurfaceFiles = [
+  'AGENTS.md',
+  'README.md',
+  '.codex-plugin/plugin.json',
+  'docs/project-direction.md',
+  'package.json',
+  ...SKILLS.map((skill) => `skills/${skill}/SKILL.md`),
+  ...REFS.map((ref) => `references/${ref}`),
+  ...scanFiles.map(rel)
+];
+const retiredHits = [];
+for (const file of activeSurfaceFiles) {
+  const full = path.join(ROOT, file);
+  if (!fs.existsSync(full)) continue;
+  const text = fs.readFileSync(full, 'utf8');
+  for (const term of retiredTerms) {
+    if (text.includes(term)) retiredHits.push(`${file}:${term}`);
+  }
+}
+check('active surfaces omit retired settings-era terms', retiredHits.length === 0, retiredHits.join(', ') || 'none');
 
 finish();

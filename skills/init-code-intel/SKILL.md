@@ -21,4 +21,4 @@ Outputs:
 
 The profile is a cache and routing hint. Live failures override stale profile data.
 
-Read `references/language-adapter-contract.md` when changing adapter coverage.
+Read `settings/schema.json` and `settings/defaults.json` when changing language coverage, LSP commands, PATH extras, or ast-grep config behavior.

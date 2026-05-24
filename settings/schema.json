@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Code Intel Settings",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "path", "astGrep", "fallback", "languages"],
+  "properties": {
+    "version": { "const": 1 },
+    "path": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["extraDirs"],
+      "properties": {
+        "extraDirs": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "astGrep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "configPath"],
+      "properties": {
+        "command": { "type": "string", "minLength": 1, "not": { "const": "sg" } },
+        "configPath": { "type": ["string", "null"] }
+      }
+    },
+    "fallback": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+    "languages": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["extensions", "astGrep", "lsp"],
+        "properties": {
+          "extensions": { "type": "array", "items": { "type": "string", "pattern": "^\\." }, "minItems": 1 },
+          "astGrep": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["languageId"],
+            "properties": {
+              "languageId": { "type": "string", "minLength": 1 }
+            }
+          },
+          "lsp": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["commands", "capabilities"],
+            "properties": {
+              "commands": { "type": "array", "items": { "type": "string" } },
+              "capabilities": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        }
+      }
+    }
+  }
+}

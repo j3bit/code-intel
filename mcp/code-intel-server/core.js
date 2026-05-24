@@ -1,12 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const PLUGIN_VERSION = '0.1.0';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const DEFAULT_REGISTRY_PATH = path.join(ROOT, 'adapters', 'registry.json');
-const DEFAULT_SCHEMA_PATH = path.join(ROOT, 'adapters', 'schema.json');
+const DEFAULT_SETTINGS_PATH = path.join(ROOT, 'settings', 'defaults.json');
+const SETTINGS_SCHEMA_PATH = path.join(ROOT, 'settings', 'schema.json');
 const TOOL_NAMES = [
   'capability_discover',
   'ast_grep_search',
@@ -29,16 +30,104 @@ function typeOf(value) {
   return typeof value;
 }
 
+function typeMatches(value, expected) {
+  const actual = typeOf(value);
+  return Array.isArray(expected) ? expected.includes(actual) : actual === expected;
+}
+
+function resolveHomeDir() {
+  return process.env.HOME || process.env.USERPROFILE || os.homedir();
+}
+
+function defaultUserSettingsPath() {
+  return path.join(resolveHomeDir(), '.codex', 'code-intel', 'settings.json');
+}
+
+function expandHome(value) {
+  if (typeof value !== 'string') return value;
+  const homeDir = resolveHomeDir();
+  if (value === '~') return homeDir || value;
+  if (value.startsWith('~/')) return homeDir ? path.join(homeDir, value.slice(2)) : value;
+  return value;
+}
+
+function resolveExtraDir(dir, repoRoot = process.cwd()) {
+  const expanded = expandHome(dir);
+  if (!expanded) return expanded;
+  return path.isAbsolute(expanded) ? expanded : path.resolve(repoRoot, expanded);
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function deepMerge(base, override) {
+  if (!isPlainObject(override)) return base;
+  const out = typeof structuredClone === 'function'
+    ? structuredClone(base)
+    : JSON.parse(JSON.stringify(base));
+  for (const [key, value] of Object.entries(override)) {
+    if (isPlainObject(value) && isPlainObject(out[key])) out[key] = deepMerge(out[key], value);
+    else out[key] = value;
+  }
+  return out;
+}
+
+function readJsonIfExists(file) {
+  if (!file || !fs.existsSync(file)) return null;
+  return readJson(file);
+}
+
+function settingsSourceError(source, file, message) {
+  const error = new Error(`settings schema validation failed: ${source} settings ${message}: ${file}`);
+  error.validationErrors = [`${source} settings ${message}: ${file}`];
+  return error;
+}
+
+function readSettingsOverrideIfExists(file, source) {
+  const settings = readJsonIfExists(file);
+  if (settings === null) return null;
+  if (!isPlainObject(settings)) {
+    throw settingsSourceError(source, file, `root expected object but got ${typeOf(settings)}`);
+  }
+  return settings;
+}
+
+function normalizeSettingsPaths(settings) {
+  if (typeof settings?.astGrep?.configPath === 'string') {
+    settings.astGrep.configPath = expandHome(settings.astGrep.configPath);
+  }
+  if (Array.isArray(settings?.path?.extraDirs)) {
+    settings.path.extraDirs = settings.path.extraDirs.map(expandHome);
+  }
+  return settings;
+}
+
 export function validateAgainstSchema(value, schema, pathLabel = '$') {
   const errors = [];
   function visit(current, currentSchema, label) {
     if (!currentSchema || typeof currentSchema !== 'object') return;
-    if (currentSchema.type && typeOf(current) !== currentSchema.type) {
-      errors.push(`${label} expected ${currentSchema.type} but got ${typeOf(current)}`);
+    if (currentSchema.type && !typeMatches(current, currentSchema.type)) {
+      errors.push(`${label} expected ${Array.isArray(currentSchema.type) ? currentSchema.type.join(' or ') : currentSchema.type} but got ${typeOf(current)}`);
       return;
+    }
+    if (Object.prototype.hasOwnProperty.call(currentSchema, 'const') && current !== currentSchema.const) {
+      errors.push(`${label} expected ${JSON.stringify(currentSchema.const)}`);
     }
     if (currentSchema.enum && !currentSchema.enum.includes(current)) {
       errors.push(`${label} expected one of ${currentSchema.enum.join(', ')}`);
+    }
+    if (currentSchema.minLength !== undefined && typeof current === 'string' && current.length < currentSchema.minLength) {
+      errors.push(`${label} expected length >= ${currentSchema.minLength}`);
+    }
+    if (currentSchema.minItems !== undefined && Array.isArray(current) && current.length < currentSchema.minItems) {
+      errors.push(`${label} expected at least ${currentSchema.minItems} items`);
+    }
+    if (currentSchema.not?.const !== undefined && current === currentSchema.not.const) {
+      errors.push(`${label} must not be ${JSON.stringify(currentSchema.not.const)}`);
+    }
+    if (currentSchema.pattern && typeof current === 'string' && !(new RegExp(currentSchema.pattern).test(current))) {
+      errors.push(`${label} does not match pattern ${currentSchema.pattern}`);
     }
     if (currentSchema.required && typeof current === 'object' && current !== null) {
       for (const key of currentSchema.required) {
@@ -53,25 +142,56 @@ export function validateAgainstSchema(value, schema, pathLabel = '$') {
     if (currentSchema.items && Array.isArray(current)) {
       current.forEach((item, index) => visit(item, currentSchema.items, `${label}[${index}]`));
     }
+    if (currentSchema.additionalProperties === false && isPlainObject(current)) {
+      const allowed = new Set(Object.keys(currentSchema.properties || {}));
+      for (const key of Object.keys(current)) {
+        if (!allowed.has(key)) errors.push(`${label}.${key} is not allowed`);
+      }
+    }
+    if (isPlainObject(currentSchema.additionalProperties) && isPlainObject(current)) {
+      const explicit = new Set(Object.keys(currentSchema.properties || {}));
+      for (const [key, item] of Object.entries(current)) {
+        if (!explicit.has(key)) visit(item, currentSchema.additionalProperties, `${label}.${key}`);
+      }
+    }
   }
   visit(value, schema, pathLabel);
   return errors;
 }
 
-export function validateRegistry(registry) {
-  const schema = readJson(DEFAULT_SCHEMA_PATH);
-  const errors = validateAgainstSchema(registry, schema, '$');
+export function validateSettings(settings) {
+  const schema = readJson(SETTINGS_SCHEMA_PATH);
+  const errors = validateAgainstSchema(settings, schema, '$');
+  if (settings?.astGrep?.command === 'sg') errors.push('$.astGrep.command must be ast-grep or another explicit executable, not sg');
   if (errors.length) {
-    const error = new Error(`adapter registry schema validation failed: ${errors.slice(0, 8).join('; ')}`);
+    const error = new Error(`settings schema validation failed: ${errors.slice(0, 8).join('; ')}`);
     error.validationErrors = errors;
     throw error;
   }
-  return registry;
+  return settings;
 }
 
-export function loadRegistry() {
-  return validateRegistry(readJson(process.env.CODE_INTEL_REGISTRY_PATH || DEFAULT_REGISTRY_PATH));
+export function loadSettings(repoRoot = process.cwd(), opts = {}) {
+  const defaultPath = opts.defaultSettingsPath || process.env.CODE_INTEL_DEFAULT_SETTINGS_PATH || DEFAULT_SETTINGS_PATH;
+  const userPath = opts.userSettingsPath || process.env.CODE_INTEL_USER_SETTINGS_PATH || defaultUserSettingsPath();
+  const projectPath = opts.projectSettingsPath || process.env.CODE_INTEL_PROJECT_SETTINGS_PATH || path.join(path.resolve(repoRoot), '.code-intel', 'settings.json');
+  const defaults = readJson(defaultPath);
+  const expandedUserPath = expandHome(userPath);
+  const expandedProjectPath = expandHome(projectPath);
+  const user = readSettingsOverrideIfExists(expandedUserPath, 'user');
+  const project = readSettingsOverrideIfExists(expandedProjectPath, 'project');
+  const merged = validateSettings(normalizeSettingsPaths(deepMerge(deepMerge(defaults, user || {}), project || {})));
+  Object.defineProperty(merged, 'sources', {
+    enumerable: false,
+    value: {
+      default: defaultPath,
+      user: user ? expandedUserPath : null,
+      project: project ? expandedProjectPath : null
+    }
+  });
+  return merged;
 }
+
 
 export function detectExecutable(command, args = ['--version']) {
   const result = spawnSync(command, args, { encoding: 'utf8', timeout: 3000 });
@@ -85,7 +205,7 @@ export function detectExecutable(command, args = ['--version']) {
   };
 }
 
-function executableCandidates(command, baseDir = process.cwd()) {
+function executableCandidates(command, baseDir = process.cwd(), settings = null) {
   const hasPathSeparator = command.includes('/') || (process.platform === 'win32' && /[\\/]/.test(command));
   const extensions = process.platform === 'win32'
     ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';').filter(Boolean)
@@ -96,19 +216,51 @@ function executableCandidates(command, baseDir = process.cwd()) {
   if (hasPathSeparator) {
     return names.map((name) => path.isAbsolute(name) ? name : path.resolve(baseDir, name));
   }
-  const dirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  const extraDirs = (settings?.path?.extraDirs || []).map((dir) => resolveExtraDir(dir, baseDir));
+  const dirs = [...extraDirs, ...(process.env.PATH || '').split(path.delimiter).filter(Boolean)];
   return dirs.flatMap((dir) => names.map((name) => path.join(dir, name)));
 }
 
-export function executableOnPath(command, baseDir = process.cwd()) {
+export function executableOnPath(command, baseDir = process.cwd(), settings = null) {
   if (!command) return { command, available: false, reason: 'no executable declared' };
-  for (const candidate of executableCandidates(command, baseDir)) {
+  for (const candidate of executableCandidates(command, baseDir, settings)) {
     try {
       fs.accessSync(candidate, fs.constants.X_OK);
       return { command, available: true, path: candidate, reason: 'executable found' };
     } catch {}
   }
   return { command, available: false, reason: 'executable not found on PATH' };
+}
+
+function detectExecutableFromSettings(command, args = ['--version'], baseDir = process.cwd(), settings = null) {
+  const resolution = executableOnPath(command, baseDir, settings);
+  if (!resolution.available) {
+    return {
+      command,
+      configuredCommand: command,
+      resolvedCommand: null,
+      executablePath: null,
+      available: false,
+      status: null,
+      stdout: '',
+      stderr: '',
+      error: resolution.reason
+    };
+  }
+  const detected = detectExecutable(resolution.path, args);
+  return {
+    ...detected,
+    command,
+    configuredCommand: command,
+    resolvedCommand: resolution.path,
+    executablePath: resolution.path
+  };
+}
+
+function envWithExtraPathDirs(env = process.env, extraDirs = [], repoRoot = process.cwd()) {
+  const dirs = (extraDirs || []).map((dir) => resolveExtraDir(dir, repoRoot)).filter(Boolean);
+  if (!dirs.length) return env;
+  return { ...env, PATH: [...dirs, env.PATH || ''].filter(Boolean).join(path.delimiter) };
 }
 
 export function splitCommandLine(commandLine) {
@@ -139,10 +291,10 @@ function firstToken(commandLine) {
   return splitCommandLine(commandLine)[0] || '';
 }
 
-export function commandAvailable(commandLine, baseDir = process.cwd()) {
+export function commandAvailable(commandLine, baseDir = process.cwd(), settings = null) {
   const command = firstToken(commandLine);
   if (!command) return { command: commandLine, available: false, reason: 'no command candidate declared' };
-  const result = executableOnPath(command, baseDir);
+  const result = executableOnPath(command, baseDir, settings);
   return {
     command: commandLine,
     executable: command,
@@ -198,26 +350,35 @@ export function resolveRepoRelativeFile(repoRoot, file) {
   return { ok: true, repoRoot: canonicalRoot, filePath: realCandidate || candidate };
 }
 
-export function adapterForFile(file, registry = loadRegistry()) {
+export function languageForFile(file, settings = loadSettings()) {
   const ext = path.extname(file).toLowerCase();
-  return registry.adapters.find((a) => a.extensions.includes(ext));
+  return Object.entries(settings.languages).find(([, language]) => language.extensions.includes(ext))?.[0] || null;
 }
 
-export function adapterForLanguage(language, registry = loadRegistry()) {
-  return registry.adapters.find((a) => a.language === language || a.astGrep.languageId === language);
+export function languageConfigForFile(file, settings = loadSettings()) {
+  const language = languageForFile(file, settings);
+  return language ? { language, config: settings.languages[language] } : { language: null, config: null };
 }
 
-export function languageInventory(repoRoot, registry = loadRegistry()) {
+export function languageConfigForLanguage(language, settings = loadSettings()) {
+  if (!language) return { language: null, config: null };
+  if (settings.languages[language]) return { language, config: settings.languages[language] };
+  const found = Object.entries(settings.languages).find(([, config]) => config.astGrep.languageId === language);
+  return found ? { language: found[0], config: found[1] } : { language: null, config: null };
+}
+
+
+export function languageInventory(repoRoot, settings = loadSettings(repoRoot)) {
   const files = walkFiles(repoRoot);
   const languages = {};
   const unsupported = {};
   for (const file of files) {
     const rel = path.relative(repoRoot, file);
-    const adapter = adapterForFile(file, registry);
-    if (adapter) {
-      languages[adapter.language] ??= { files: 0, extensions: adapter.extensions, examples: [] };
-      languages[adapter.language].files += 1;
-      if (languages[adapter.language].examples.length < 5) languages[adapter.language].examples.push(rel);
+    const { language, config } = languageConfigForFile(file, settings);
+    if (language && config) {
+      languages[language] ??= { files: 0, extensions: config.extensions, examples: [] };
+      languages[language].files += 1;
+      if (languages[language].examples.length < 5) languages[language].examples.push(rel);
     } else {
       const ext = path.extname(file).toLowerCase() || '[no extension]';
       unsupported[ext] = (unsupported[ext] || 0) + 1;
@@ -227,51 +388,56 @@ export function languageInventory(repoRoot, registry = loadRegistry()) {
 }
 
 export function discoverCapabilities(repoRoot = process.cwd()) {
-  const registry = loadRegistry();
-  const ast = detectExecutable('ast-grep', ['--version']);
-  const inventory = languageInventory(repoRoot, registry);
+  const settings = loadSettings(repoRoot);
+  const ast = detectExecutableFromSettings(settings.astGrep.command, ['--version'], repoRoot, settings);
+  const inventory = languageInventory(repoRoot, settings);
   const languages = {};
-  for (const adapter of registry.adapters) {
-    const present = inventory.languages[adapter.language]?.files || 0;
-    const lspCommands = adapter.lsp.commands.map((command) => commandAvailable(command, repoRoot));
-    const lspAvailable = lspCommands.find((c) => c.available)?.command || null;
-    languages[adapter.language] = {
+  for (const [language, config] of Object.entries(settings.languages)) {
+    const present = inventory.languages[language]?.files || 0;
+    const lspCommands = config.lsp.commands.map((command) => commandAvailable(command, repoRoot, settings));
+    const lspAvailable = lspCommands.find((candidate) => candidate.available)?.command || null;
+    languages[language] = {
       presentFiles: present,
-      extensions: adapter.extensions,
-      astGrep: ast.available && adapter.astGrep.supported === 'builtin' ? 'available' : 'unavailable',
-      astGrepLanguageId: adapter.astGrep.languageId,
+      extensions: config.extensions,
+      astGrep: ast.available ? 'available' : 'unavailable',
+      astGrepLanguageId: config.astGrep.languageId,
       lsp: lspAvailable ? 'commandDetected' : 'missing',
       lspState: lspAvailable ? 'commandDetected' : 'missing',
       methodVerified: [],
       methodUnsupported: [],
       lspCommand: lspAvailable,
       lspCommands,
-      capabilities: adapter.lsp.capabilities,
-      fallback: adapter.fallback
+      capabilities: config.lsp.capabilities,
+      fallback: settings.fallback
     };
   }
   return {
+    status: 'ok',
     pluginVersion: PLUGIN_VERSION,
-    adapterRegistryVersion: registry.version,
-    repoRoot: path.resolve(repoRoot),
+    settingsVersion: settings.version,
+    settingsSources: settings.sources,
     generatedAt: new Date().toISOString(),
+    repoRoot: path.resolve(repoRoot),
+    inventory,
+    languages,
     tools: {
       astGrep: {
-        command: 'ast-grep',
+        command: settings.astGrep.command,
         available: ast.available,
         version: ast.stdout || ast.stderr || null,
+        configPath: settings.astGrep.configPath || null,
+        resolvedCommand: ast.resolvedCommand,
         note: 'Do not use sg alias.'
       }
     },
-    inventory,
-    languages,
     fallbackPolicy: ast.available ? 'Use rg/grep when AST or LSP is unsupported or inconclusive.' : 'Fallback reason: ast-grep executable was not found on PATH. Command policy: this plugin does not call sg.'
   };
 }
 
 export function resolveCapabilityRoute(args = {}) {
   const discovery = discoverCapabilities(args.repoRoot || process.cwd());
-  const language = args.language || (args.file ? adapterForFile(path.resolve(args.repoRoot || process.cwd(), args.file))?.language : null);
+  const settings = loadSettings(args.repoRoot || process.cwd());
+  const language = args.language || (args.file ? languageConfigForFile(path.resolve(args.repoRoot || process.cwd(), args.file), settings).language : null);
   const info = language ? discovery.languages[language] : null;
   if (!info) {
     return { status: 'fallback', language, route: ['rg', 'grep'], fallbackReason: 'unsupported language or missing language hint' };
@@ -287,12 +453,14 @@ export function resolveCapabilityRoute(args = {}) {
   return { status: 'fallback', language, route: ['rg', 'grep'], fallbackReason: 'ast-grep unavailable or unsupported' };
 }
 
-function astUnavailable(language, reason = 'ast-grep executable was not found on PATH') {
+function astUnavailable(language, reason = 'ast-grep executable was not found on PATH', settings = null) {
   return {
     status: 'unavailable',
     language,
     results: [],
-    fallback: ['rg', 'grep'],
+    executable: settings?.astGrep?.command || 'ast-grep',
+    configPath: settings?.astGrep?.configPath || null,
+    fallback: settings?.fallback || ['rg', 'grep'],
     fallbackReason: reason,
     commandPolicy: 'this plugin does not call sg'
   };
@@ -313,34 +481,50 @@ function normalizeAstGrepJson(stdout, language = null) {
 
 export function astGrepSearch(args = {}) {
   const repoRoot = path.resolve(args.repoRoot || process.cwd());
+  const settings = loadSettings(repoRoot);
   const pattern = args.pattern;
   const language = args.language;
-  if (!pattern) return { status: 'error', error: 'pattern is required', results: [], fallback: ['rg', 'grep'] };
-  const registry = loadRegistry();
-  const adapter = language ? adapterForLanguage(language, registry) : null;
-  if (language && !adapter) return astUnavailable(language, `unsupported language: ${language}`);
-  const ast = detectExecutable('ast-grep', ['--version']);
-  if (!ast.available) return astUnavailable(language || 'unknown');
-  const lang = adapter?.astGrep.languageId || language;
-  if (!lang) return { status: 'needs_language', error: 'language is required when path inference is not provided', results: [], fallback: ['rg', 'grep'] };
-  const cmdArgs = ['--pattern', pattern, '--lang', lang, '--json', repoRoot];
-  const result = spawnSync('ast-grep', cmdArgs, { encoding: 'utf8', timeout: args.timeoutMs || 10000, maxBuffer: 10 * 1024 * 1024 });
+  if (!pattern) return { status: 'error', error: 'pattern is required', results: [], fallback: settings.fallback, configPath: settings.astGrep.configPath || null };
+  const { language: resolvedLanguage, config } = language ? languageConfigForLanguage(language, settings) : { language: null, config: null };
+  if (language && !config) return astUnavailable(language, `unsupported language: ${language}`, settings);
+  const ast = detectExecutableFromSettings(settings.astGrep.command, ['--version'], repoRoot, settings);
+  if (!ast.available) return astUnavailable(language || 'unknown', `${settings.astGrep.command} executable was not found on PATH`, settings);
+  const lang = config?.astGrep.languageId || language;
+  if (!lang) return { status: 'needs_language', error: 'language is required when path inference is not provided', results: [], fallback: settings.fallback, configPath: settings.astGrep.configPath || null };
+  const cmdArgs = [];
+  if (settings.astGrep.configPath) cmdArgs.push('--config', expandHome(settings.astGrep.configPath));
+  cmdArgs.push('--pattern', pattern, '--lang', lang, '--json', repoRoot);
+  const result = spawnSync(ast.resolvedCommand || settings.astGrep.command, cmdArgs, { cwd: repoRoot, encoding: 'utf8', timeout: args.timeoutMs || 10000, maxBuffer: 10 * 1024 * 1024 });
   if (result.status !== 0 && !result.stdout) {
     return {
       status: 'error',
-      executable: 'ast-grep',
-      language: lang,
+      executable: settings.astGrep.command,
+      configPath: settings.astGrep.configPath || null,
+      resolvedCommand: ast.resolvedCommand,
+      language: resolvedLanguage || language || lang,
+      astGrepLanguageId: lang,
       patternSummary: pattern.slice(0, 120),
       stderrSummary: (result.stderr || result.error?.message || '').trim().slice(0, 1000),
-      fallback: ['rg', 'grep'],
+      fallback: settings.fallback,
       fallbackReason: 'ast-grep failed; revise pattern or use text fallback',
       commandPolicy: 'this plugin does not call sg'
     };
   }
   let results = [];
   try { results = normalizeAstGrepJson(result.stdout, lang).slice(0, args.maxResults || 100); }
-  catch (error) { return { status: 'error', error: `failed to parse ast-grep JSON: ${error.message}`, raw: result.stdout.slice(0, 1000), fallback: ['rg', 'grep'] }; }
-  return { status: 'ok', executable: 'ast-grep', language: lang, patternSummary: pattern.slice(0, 120), results, fallback: results.length ? [] : ['rg', 'grep'], fallbackReason: results.length ? null : 'ast-grep returned no matches; text supplement may be useful' };
+  catch (error) { return { status: 'error', error: `failed to parse ast-grep JSON: ${error.message}`, raw: result.stdout.slice(0, 1000), fallback: settings.fallback, configPath: settings.astGrep.configPath || null }; }
+  return {
+    status: 'ok',
+    executable: settings.astGrep.command,
+    configPath: settings.astGrep.configPath || null,
+    resolvedCommand: ast.resolvedCommand,
+    language: resolvedLanguage || language || lang,
+    astGrepLanguageId: lang,
+    patternSummary: pattern.slice(0, 120),
+    results,
+    fallback: results.length ? [] : settings.fallback,
+    fallbackReason: results.length ? null : 'ast-grep returned no matches; text supplement may be useful'
+  };
 }
 
 export function astGrepReplacePreview(args = {}) {
@@ -361,36 +545,45 @@ export function astGrepReplacePreview(args = {}) {
   };
 }
 
-function runtimeFallbackUsed(adapter) {
-  if (adapter?.astGrep?.supported === 'builtin' && detectExecutable('ast-grep', ['--version']).available) {
+function runtimeFallbackUsed(config, settings = null, baseDir = process.cwd()) {
+  if (config?.astGrep?.languageId && detectExecutableFromSettings(settings?.astGrep?.command || 'ast-grep', ['--version'], baseDir, settings).available) {
     return 'ast-grep or rg/grep';
   }
   return 'rg/grep';
 }
 
 function lspUnavailable(method, args = {}, reason = 'no LSP server command detected', extra = {}) {
-  const registry = loadRegistry();
-  const adapter = args.language ? adapterForLanguage(args.language, registry) : args.file ? adapterForFile(path.resolve(args.repoRoot || process.cwd(), args.file), registry) : null;
+  const repoRoot = path.resolve(args.repoRoot || process.cwd());
+  const settings = extra.settings || loadSettings(repoRoot);
+  const resolved = args.language
+    ? languageConfigForLanguage(args.language, settings)
+    : args.file
+      ? languageConfigForFile(path.resolve(repoRoot, args.file), settings)
+      : { language: null, config: null };
   return {
     status: 'unavailable',
     method,
-    language: adapter?.language || args.language || null,
+    language: resolved.language || args.language || null,
     command: null,
     stderrSummary: '',
     degradedCapability: method,
-    fallbackUsed: runtimeFallbackUsed(adapter),
+    fallbackUsed: runtimeFallbackUsed(resolved.config, settings, repoRoot),
     fallbackReason: reason,
-    ...extra
+    ...Object.fromEntries(Object.entries(extra).filter(([key]) => key !== 'settings'))
   };
 }
 
 function findLspCommand(args = {}) {
-  const registry = loadRegistry();
   const repoRoot = path.resolve(args.repoRoot || process.cwd());
-  const adapter = args.language ? adapterForLanguage(args.language, registry) : args.file ? adapterForFile(path.resolve(repoRoot, args.file), registry) : null;
-  if (!adapter) return { adapter: null, command: null };
-  const available = adapter.lsp.commands.map((command) => commandAvailable(command, repoRoot)).find((c) => c.available);
-  return { adapter, command: available?.command || null };
+  const settings = loadSettings(repoRoot);
+  const resolved = args.language
+    ? languageConfigForLanguage(args.language, settings)
+    : args.file
+      ? languageConfigForFile(path.resolve(repoRoot, args.file), settings)
+      : { language: null, config: null };
+  if (!resolved.config) return { language: resolved.language, config: null, command: null, settings };
+  const available = resolved.config.lsp.commands.map((command) => commandAvailable(command, repoRoot, settings)).find((candidate) => candidate.available);
+  return { language: resolved.language, config: resolved.config, command: available?.command || null, settings };
 }
 
 function lspFrame(message) {
@@ -512,13 +705,13 @@ function lspParams(method, uri, args = {}) {
   }
 }
 
-export async function runLspRequestAsync(commandLine, adapter, method, args = {}) {
+export async function runLspRequestAsync(commandLine, languageRuntime, method, args = {}) {
   const resolved = resolveRepoRelativeFile(args.repoRoot || process.cwd(), args.file);
-  if (!resolved.ok) return lspUnavailable(method, { ...args, language: adapter.language }, resolved.reason);
+  if (!resolved.ok) return lspUnavailable(method, { ...args, language: languageRuntime.language }, resolved.reason);
   const { repoRoot, filePath } = resolved;
-  if (!fs.existsSync(filePath)) return lspUnavailable(method, { ...args, language: adapter.language }, `file not found: ${args.file}`);
+  if (!fs.existsSync(filePath)) return lspUnavailable(method, { ...args, language: languageRuntime.language }, `file not found: ${args.file}`);
   const commandParts = splitCommandLine(commandLine);
-  if (!commandParts.length) return lspUnavailable(method, { ...args, language: adapter.language }, 'LSP command candidate is empty');
+  if (!commandParts.length) return lspUnavailable(method, { ...args, language: languageRuntime.language }, 'LSP command candidate is empty');
 
   const uri = pathToFileURL(filePath).href;
   const text = fs.readFileSync(filePath, 'utf8');
@@ -554,7 +747,7 @@ export async function runLspRequestAsync(commandLine, adapter, method, args = {}
     if (initialize?.error) throw Object.assign(new Error('LSP initialize failed'), { lspError: initialize.error });
 
     write({ jsonrpc: '2.0', method: 'initialized', params: {} });
-    write({ jsonrpc: '2.0', method: 'textDocument/didOpen', params: { textDocument: { uri, languageId: adapter.language, version: 1, text } } });
+    write({ jsonrpc: '2.0', method: 'textDocument/didOpen', params: { textDocument: { uri, languageId: languageRuntime.language, version: 1, text } } });
     write({ jsonrpc: '2.0', id: 2, method, params: lspParams(method, uri, args) });
     const response = await waitForLspMessage(state, (message) => message.id === 2, timeoutMs);
 
@@ -567,11 +760,11 @@ export async function runLspRequestAsync(commandLine, adapter, method, args = {}
       return {
         status: 'error',
         method,
-        language: adapter.language,
+        language: languageRuntime.language,
         command: commandLine,
         error: response.error,
         stderrSummary: state.stderr.toString('utf8').trim().slice(0, 1000),
-        fallbackUsed: runtimeFallbackUsed(adapter),
+        fallbackUsed: runtimeFallbackUsed(languageRuntime, args.settings || null, args.repoRoot || process.cwd()),
         fallbackReason: 'LSP server returned an error'
       };
     }
@@ -580,7 +773,7 @@ export async function runLspRequestAsync(commandLine, adapter, method, args = {}
       return {
         status: 'ok',
         method,
-        language: adapter.language,
+        language: languageRuntime.language,
         command: commandLine,
         serverInfo: initialize?.result?.serverInfo || null,
         lspState: 'methodVerified',
@@ -593,14 +786,14 @@ export async function runLspRequestAsync(commandLine, adapter, method, args = {}
         fallbackReason: null
       };
     }
-    return lspUnavailable(method, { ...args, language: adapter.language }, 'LSP server did not return a response for the requested method', {
+    return lspUnavailable(method, { ...args, language: languageRuntime.language }, 'LSP server did not return a response for the requested method', {
       command: commandLine,
       stderrSummary: state.stderr.toString('utf8').trim().slice(0, 1000),
       parsedMessages: state.messages.length
     });
   } catch (error) {
     child.kill();
-    return lspUnavailable(method, { ...args, language: adapter.language }, error.lspError ? 'LSP initialize failed' : 'LSP server did not return a response for the requested method', {
+    return lspUnavailable(method, { ...args, language: languageRuntime.language }, error.lspError ? 'LSP initialize failed' : 'LSP server did not return a response for the requested method', {
       command: commandLine,
       error: error.lspError || { message: error.message },
       stderrSummary: state.stderr.toString('utf8').trim().slice(0, 1000),
@@ -609,23 +802,23 @@ export async function runLspRequestAsync(commandLine, adapter, method, args = {}
   }
 }
 
-export function runLspRequest(commandLine, adapter, method, args = {}) {
+export function runLspRequest(commandLine, languageRuntime, method, args = {}) {
   const workerArgs = {
     ...args,
     repoRoot: args.repoRoot ? path.resolve(args.repoRoot) : undefined
   };
   const worker = spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--run-lsp-request-json'], {
     cwd: workerArgs.repoRoot || process.cwd(),
-    input: JSON.stringify({ commandLine, adapter, method, args: workerArgs }),
+    input: JSON.stringify({ commandLine, languageRuntime, method, args: workerArgs }),
     encoding: 'utf8',
     timeout: (workerArgs.timeoutMs || 10000) + 5000,
     maxBuffer: 10 * 1024 * 1024,
-    env: process.env
+    env: envWithExtraPathDirs(process.env, workerArgs.settingsPathExtraDirs, workerArgs.repoRoot || process.cwd())
   });
   if (worker.status === 0 && worker.stdout) {
     try { return JSON.parse(worker.stdout); } catch {}
   }
-  return lspUnavailable(method, { ...args, language: adapter.language }, 'LSP server did not return a response for the requested method', {
+  return lspUnavailable(method, { ...args, language: languageRuntime.language }, 'LSP server did not return a response for the requested method', {
     command: commandLine,
     statusCode: worker.status,
     stderrSummary: (worker.stderr || worker.error?.message || '').trim().slice(0, 1000)
@@ -633,10 +826,11 @@ export function runLspRequest(commandLine, adapter, method, args = {}) {
 }
 
 export function lspTool(method, args = {}) {
-  const { adapter, command } = findLspCommand(args);
-  if (!adapter) return lspUnavailable(method, args, 'unsupported language or file extension');
-  if (!command) return lspUnavailable(method, { ...args, language: adapter.language }, 'LSP command missing');
-  return runLspRequest(command, adapter, method, args);
+  const { language, config, command, settings } = findLspCommand(args);
+  if (!config) return lspUnavailable(method, args, 'unsupported language or file extension', { settings });
+  const languageRuntime = { language, ...config };
+  if (!command) return lspUnavailable(method, { ...args, language }, 'LSP command missing', { settings });
+  return runLspRequest(command, languageRuntime, method, { ...args, settings: { astGrep: settings.astGrep, path: settings.path }, settingsPathExtraDirs: settings.path.extraDirs });
 }
 
 export function callTool(name, args = {}) {
@@ -689,8 +883,8 @@ export const tools = TOOL_NAMES.map((name) => {
 async function runLspWorkerCli() {
   let input = '';
   for await (const chunk of process.stdin) input += chunk;
-  const { commandLine, adapter, method, args } = JSON.parse(input || '{}');
-  const result = await runLspRequestAsync(commandLine, adapter, method, args || {});
+  const { commandLine, languageRuntime, method, args } = JSON.parse(input || '{}');
+  const result = await runLspRequestAsync(commandLine, languageRuntime, method, args || {});
   process.stdout.write(JSON.stringify(result));
 }
 
