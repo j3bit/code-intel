@@ -161,6 +161,30 @@ try {
 } finally {
   fs.rmSync(malformedSettingsRoot, { recursive: true, force: true });
 }
+if (!process.env.CODE_INTEL_EXPECT_VALIDATION_FAILURE) {
+  const malformedDefaultSettingsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-bad-settings-'));
+  try {
+    const badSettingsPath = path.join(malformedDefaultSettingsRoot, 'bad-settings.json');
+    writeJson(badSettingsPath, { version: 1, astGrep: { command: 'sg' } });
+    const badSettingsRun = run('node', ['scripts/validate-plugin.js', '--json'], {
+      env: {
+        ...process.env,
+        CODE_INTEL_DEFAULT_SETTINGS_PATH: badSettingsPath,
+        CODE_INTEL_USER_SETTINGS_PATH: path.join(malformedDefaultSettingsRoot, 'missing-user-settings.json'),
+        CODE_INTEL_PROJECT_SETTINGS_PATH: path.join(malformedDefaultSettingsRoot, 'missing-project-settings.json'),
+        CODE_INTEL_EXPECT_VALIDATION_FAILURE: '1'
+      }
+    });
+    const badSettingsEvidence = `${badSettingsRun.stdout}\n${badSettingsRun.stderr}`;
+    check(
+      'settings schema validation rejects malformed settings',
+      badSettingsRun.status !== 0 && badSettingsEvidence.includes('settings schema'),
+      badSettingsEvidence.slice(0, 500)
+    );
+  } finally {
+    fs.rmSync(malformedDefaultSettingsRoot, { recursive: true, force: true });
+  }
+}
 const settingsExpansionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-settings-expansion-'));
 const originalHome = process.env.HOME;
 try {
@@ -348,11 +372,22 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
 `);
   fs.chmodSync(fakeNoVersionLsp, 0o755);
   const fakeSettingsPath = path.join(fakeLspRoot, 'settings.json');
-  const fakeLspEnv = { ...process.env, PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH || ''}`, CODE_INTEL_PROJECT_SETTINGS_PATH: fakeSettingsPath };
+  const fakeLspEnv = {
+    ...process.env,
+    PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH || ''}`,
+    CODE_INTEL_DEFAULT_SETTINGS_PATH: fakeSettingsPath,
+    CODE_INTEL_USER_SETTINGS_PATH: path.join(fakeLspRoot, 'missing-user-settings.json'),
+    CODE_INTEL_PROJECT_SETTINGS_PATH: path.join(fakeLspRoot, 'missing-project-settings.json')
+  };
   writeJson(fakeSettingsPath, {
     version: 1,
+    path: { extraDirs: [fakeBinDir] },
+    astGrep: { command: 'ast-grep', configPath: null },
+    fallback: ['rg', 'grep'],
     languages: {
       typescript: {
+        extensions: ['.ts'],
+        astGrep: { languageId: 'typescript' },
         lsp: { commands: ['fake-no-version-lsp --stdio'], capabilities: ['definition', 'references', 'rename', 'diagnostics', 'symbols'] }
       }
     }
@@ -404,6 +439,8 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
   writeJson(extraSettingsPath, {
     version: 1,
     path: { extraDirs: [extraBinDir] },
+    astGrep: { command: 'ast-grep', configPath: null },
+    fallback: ['rg', 'grep'],
     languages: {
       typescript: {
         extensions: ['.ts'],
@@ -412,7 +449,12 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
       }
     }
   });
-  const extraEnv = { ...process.env, CODE_INTEL_PROJECT_SETTINGS_PATH: extraSettingsPath };
+  const extraEnv = {
+    ...process.env,
+    CODE_INTEL_DEFAULT_SETTINGS_PATH: extraSettingsPath,
+    CODE_INTEL_USER_SETTINGS_PATH: path.join(extraPathLspRoot, 'missing-user-settings.json'),
+    CODE_INTEL_PROJECT_SETTINGS_PATH: path.join(extraPathLspRoot, 'missing-project-settings.json')
+  };
   const extraDiscoveryProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'capability_discover', '--args', JSON.stringify({ repoRoot: targetRepo })], {
     env: extraEnv
   });
@@ -456,6 +498,9 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
   const relativeSettingsPath = path.join(relativeLspRoot, 'settings.json');
   writeJson(relativeSettingsPath, {
     version: 1,
+    path: { extraDirs: [] },
+    astGrep: { command: 'ast-grep', configPath: null },
+    fallback: ['rg', 'grep'],
     languages: {
       typescript: {
         extensions: ['.ts'],
@@ -465,7 +510,12 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
     }
   });
 
-  const relativeEnv = { ...process.env, CODE_INTEL_PROJECT_SETTINGS_PATH: relativeSettingsPath };
+  const relativeEnv = {
+    ...process.env,
+    CODE_INTEL_DEFAULT_SETTINGS_PATH: relativeSettingsPath,
+    CODE_INTEL_USER_SETTINGS_PATH: path.join(relativeLspRoot, 'missing-user-settings.json'),
+    CODE_INTEL_PROJECT_SETTINGS_PATH: path.join(relativeLspRoot, 'missing-project-settings.json')
+  };
   const relativeDiscoveryProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'capability_discover', '--args', JSON.stringify({ repoRoot: targetRepo })], {
     env: relativeEnv
   });
@@ -497,14 +547,24 @@ try {
   const strictSettingsPath = path.join(strictLspRoot, 'settings.json');
   writeJson(strictSettingsPath, {
     version: 1,
+    path: { extraDirs: [] },
+    astGrep: { command: 'ast-grep', configPath: null },
+    fallback: ['rg', 'grep'],
     languages: {
       typescript: {
+        extensions: ['.ts'],
+        astGrep: { languageId: 'typescript' },
         lsp: { commands: [`node "${path.join(ROOT, 'fixtures/lsp/strict-init-lsp-server.js')}"`], capabilities: ['definition', 'references', 'rename', 'diagnostics', 'symbols'] }
       }
     }
   });
   const strictProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'lsp_symbols', '--args', JSON.stringify({ repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'), file: 'src/math.ts', timeoutMs: 5000 })], {
-    env: { ...process.env, CODE_INTEL_PROJECT_SETTINGS_PATH: strictSettingsPath }
+    env: {
+      ...process.env,
+      CODE_INTEL_DEFAULT_SETTINGS_PATH: strictSettingsPath,
+      CODE_INTEL_USER_SETTINGS_PATH: path.join(strictLspRoot, 'missing-user-settings.json'),
+      CODE_INTEL_PROJECT_SETTINGS_PATH: path.join(strictLspRoot, 'missing-project-settings.json')
+    }
   });
   const strictOutput = JSON.parse(strictProbe.stdout || '{}');
   check(
@@ -731,7 +791,7 @@ for (const [name, expectation] of behavior) check(`behavior documented: ${name}`
 
 // No forbidden command path in executable/config surfaces.
 const scanFiles = [];
-for (const dir of ['scripts','hooks','adapters','mcp','settings']) {
+for (const dir of ['scripts','hooks','settings','mcp']) {
   const stack = [path.join(ROOT, dir)];
   while (stack.length) {
     const item = stack.pop();
@@ -744,6 +804,6 @@ for (const dir of ['scripts','hooks','adapters','mcp','settings']) {
 }
 const commandCallPattern = /(?:spawnSync|spawn|execFile|exec)\s*\(\s*['"]sg['"]|"command"\s*:\s*"sg"/;
 const offenders = scanFiles.filter((file) => commandCallPattern.test(fs.readFileSync(file, 'utf8'))).map(rel);
-check('no script hook registry or MCP path calls forbidden shorthand command', offenders.length === 0, offenders.join(', ') || 'none');
+check('no script hook settings or MCP path calls forbidden shorthand command', offenders.length === 0, offenders.join(', ') || 'none');
 
 finish();
