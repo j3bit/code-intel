@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { tools, callTool, splitCommandLine } from '../mcp/code-intel-server/core.js';
+import { tools, callTool, loadSettings, validateSettings, splitCommandLine } from '../mcp/code-intel-server/core.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const EXPECTED_TOOLS = ['capability_discover','ast_grep_search','ast_grep_replace_preview','lsp_diagnostics','lsp_symbols','lsp_goto_definition','lsp_find_references','lsp_prepare_rename','lsp_rename_preview'];
@@ -17,58 +17,6 @@ function readJson(rel) { return JSON.parse(fs.readFileSync(path.join(ROOT, rel),
 function run(cmd, args, opts = {}) { return spawnSync(cmd, args, { cwd: ROOT, encoding: 'utf8', timeout: 15000, maxBuffer: 10 * 1024 * 1024, ...opts }); }
 function rel(file) { return path.relative(ROOT, file); }
 function writeJson(file, value) { fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n'); }
-function validateSettingsAgainstSchema(settings, schema) {
-  const errors = [];
-  function typeOf(value) {
-    if (Array.isArray(value)) return 'array';
-    if (value === null) return 'null';
-    return typeof value;
-  }
-  function typeMatches(value, expected) {
-    const actual = typeOf(value);
-    return Array.isArray(expected) ? expected.includes(actual) : actual === expected;
-  }
-  function visit(value, node, label) {
-    if (!node || typeof node !== 'object') return;
-    if (node.type && !typeMatches(value, node.type)) {
-      errors.push(`${label} expected ${Array.isArray(node.type) ? node.type.join(' or ') : node.type} but got ${typeOf(value)}`);
-      return;
-    }
-    if (Object.prototype.hasOwnProperty.call(node, 'const') && value !== node.const) {
-      errors.push(`${label} expected const ${JSON.stringify(node.const)}`);
-    }
-    if (node.not?.const !== undefined && value === node.not.const) {
-      errors.push(`${label} must not be ${JSON.stringify(node.not.const)}`);
-    }
-    if (typeof value === 'string') {
-      if (node.minLength !== undefined && value.length < node.minLength) errors.push(`${label} shorter than minLength ${node.minLength}`);
-      if (node.pattern && !(new RegExp(node.pattern).test(value))) errors.push(`${label} does not match pattern ${node.pattern}`);
-    }
-    if (Array.isArray(value)) {
-      if (node.minItems !== undefined && value.length < node.minItems) errors.push(`${label} shorter than minItems ${node.minItems}`);
-      if (node.items) value.forEach((item, index) => visit(item, node.items, `${label}[${index}]`));
-    }
-    if (value && typeof value === 'object' && !Array.isArray(value)) {
-      const properties = node.properties || {};
-      if (node.required) {
-        for (const key of node.required) {
-          if (!Object.prototype.hasOwnProperty.call(value, key)) errors.push(`${label}.${key} is required`);
-        }
-      }
-      for (const [key, child] of Object.entries(properties)) {
-        if (Object.prototype.hasOwnProperty.call(value, key)) visit(value[key], child, `${label}.${key}`);
-      }
-      const extraKeys = Object.keys(value).filter((key) => !Object.prototype.hasOwnProperty.call(properties, key));
-      if (node.additionalProperties === false) {
-        for (const key of extraKeys) errors.push(`${label}.${key} is not allowed`);
-      } else if (node.additionalProperties && typeof node.additionalProperties === 'object') {
-        for (const key of extraKeys) visit(value[key], node.additionalProperties, `${label}.${key}`);
-      }
-    }
-  }
-  visit(settings, schema, '$');
-  if (errors.length) throw new Error(`settings schema validation failed: ${errors.slice(0, 8).join('; ')}`);
-}
 function validateSkillFrontmatter(relPath) {
   const body = fs.readFileSync(path.join(ROOT, relPath), 'utf8');
   const lines = body.split(/\r?\n/);
@@ -152,7 +100,7 @@ check('default settings exists', exists('settings/defaults.json'), 'settings/def
 let defaultSettings;
 try {
   defaultSettings = readJson('settings/defaults.json');
-  validateSettingsAgainstSchema(defaultSettings, readJson('settings/schema.json'));
+  validateSettings(defaultSettings);
   check('default settings validate against settings/schema.json', true, 'settings/defaults.json');
 } catch (error) {
   check('default settings validate against settings/schema.json', false, error.message);
@@ -161,6 +109,39 @@ try {
 check('default settings include python language', Boolean(defaultSettings.languages?.python?.lsp?.commands?.length), JSON.stringify(defaultSettings.languages?.python || {}));
 check('default settings include typescript language', Boolean(defaultSettings.languages?.typescript?.lsp?.commands?.length), JSON.stringify(defaultSettings.languages?.typescript || {}));
 check('default settings command policy uses ast-grep', defaultSettings.astGrep?.command === 'ast-grep', defaultSettings.astGrep?.command);
+const settingsMergeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-settings-merge-'));
+try {
+  const userSettingsPath = path.join(settingsMergeRoot, 'user-settings.json');
+  const projectRoot = path.join(settingsMergeRoot, 'repo');
+  const projectSettingsDir = path.join(projectRoot, '.code-intel');
+  fs.mkdirSync(projectSettingsDir, { recursive: true });
+  writeJson(userSettingsPath, {
+    version: 1,
+    path: { extraDirs: [path.join(settingsMergeRoot, 'user-bin')] },
+    astGrep: { configPath: path.join(settingsMergeRoot, 'user-sgconfig.yml') },
+    languages: {
+      python: { lsp: { commands: ['user-pyright --stdio'] } },
+      systemverilog: {
+        extensions: ['.sv', '.svh'],
+        astGrep: { languageId: 'systemverilog' },
+        lsp: { commands: ['slangd'], capabilities: ['definition', 'diagnostics', 'symbols'] }
+      }
+    }
+  });
+  writeJson(path.join(projectSettingsDir, 'settings.json'), {
+    version: 1,
+    languages: {
+      python: { lsp: { commands: ['project-pyright --stdio'] } }
+    }
+  });
+  const merged = loadSettings(projectRoot, { userSettingsPath });
+  check('settings merge uses user scope custom language', Boolean(merged.languages.systemverilog), JSON.stringify(merged.languages.systemverilog || {}));
+  check('settings merge lets project override user LSP command', merged.languages.python.lsp.commands[0] === 'project-pyright --stdio', JSON.stringify(merged.languages.python.lsp.commands));
+  check('settings merge preserves default python extensions', merged.languages.python.extensions.includes('.py'), JSON.stringify(merged.languages.python));
+  check('settings merge records source paths', merged.sources.user === userSettingsPath && merged.sources.project.endsWith('.code-intel/settings.json'), JSON.stringify(merged.sources));
+} finally {
+  fs.rmSync(settingsMergeRoot, { recursive: true, force: true });
+}
 check('scripts executable or documented', ['scripts/init-code-intel.js','scripts/doctor-code-intel.js','scripts/validate-plugin.js'].every((f) => fs.statSync(path.join(ROOT, f)).mode & 0o111), 'init/doctor/validate executable');
 
 // MCP contract validation

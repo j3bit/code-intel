@@ -5,8 +5,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const PLUGIN_VERSION = '0.1.0';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const DEFAULT_REGISTRY_PATH = path.join(ROOT, 'adapters', 'registry.json');
-const DEFAULT_SCHEMA_PATH = path.join(ROOT, 'adapters', 'schema.json');
+const DEFAULT_SETTINGS_PATH = path.join(ROOT, 'settings', 'defaults.json');
+const SETTINGS_SCHEMA_PATH = path.join(ROOT, 'settings', 'schema.json');
+const USER_SETTINGS_PATH = path.join(process.env.HOME || '', '.codex', 'code-intel', 'settings.json');
 const TOOL_NAMES = [
   'capability_discover',
   'ast_grep_search',
@@ -29,16 +30,64 @@ function typeOf(value) {
   return typeof value;
 }
 
+function typeMatches(value, expected) {
+  const actual = typeOf(value);
+  return Array.isArray(expected) ? expected.includes(actual) : actual === expected;
+}
+
+function expandHome(value) {
+  if (typeof value !== 'string') return value;
+  if (value === '~') return process.env.HOME || value;
+  if (value.startsWith('~/')) return path.join(process.env.HOME || '', value.slice(2));
+  return value;
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function deepMerge(base, override) {
+  if (!isPlainObject(override)) return base;
+  const out = typeof structuredClone === 'function'
+    ? structuredClone(base)
+    : JSON.parse(JSON.stringify(base));
+  for (const [key, value] of Object.entries(override)) {
+    if (isPlainObject(value) && isPlainObject(out[key])) out[key] = deepMerge(out[key], value);
+    else out[key] = value;
+  }
+  return out;
+}
+
+function readJsonIfExists(file) {
+  if (!file || !fs.existsSync(file)) return null;
+  return readJson(file);
+}
+
 export function validateAgainstSchema(value, schema, pathLabel = '$') {
   const errors = [];
   function visit(current, currentSchema, label) {
     if (!currentSchema || typeof currentSchema !== 'object') return;
-    if (currentSchema.type && typeOf(current) !== currentSchema.type) {
-      errors.push(`${label} expected ${currentSchema.type} but got ${typeOf(current)}`);
+    if (currentSchema.type && !typeMatches(current, currentSchema.type)) {
+      errors.push(`${label} expected ${Array.isArray(currentSchema.type) ? currentSchema.type.join(' or ') : currentSchema.type} but got ${typeOf(current)}`);
       return;
+    }
+    if (Object.prototype.hasOwnProperty.call(currentSchema, 'const') && current !== currentSchema.const) {
+      errors.push(`${label} expected ${JSON.stringify(currentSchema.const)}`);
     }
     if (currentSchema.enum && !currentSchema.enum.includes(current)) {
       errors.push(`${label} expected one of ${currentSchema.enum.join(', ')}`);
+    }
+    if (currentSchema.minLength !== undefined && typeof current === 'string' && current.length < currentSchema.minLength) {
+      errors.push(`${label} expected length >= ${currentSchema.minLength}`);
+    }
+    if (currentSchema.minItems !== undefined && Array.isArray(current) && current.length < currentSchema.minItems) {
+      errors.push(`${label} expected at least ${currentSchema.minItems} items`);
+    }
+    if (currentSchema.not?.const !== undefined && current === currentSchema.not.const) {
+      errors.push(`${label} must not be ${JSON.stringify(currentSchema.not.const)}`);
+    }
+    if (currentSchema.pattern && typeof current === 'string' && !(new RegExp(currentSchema.pattern).test(current))) {
+      errors.push(`${label} does not match pattern ${currentSchema.pattern}`);
     }
     if (currentSchema.required && typeof current === 'object' && current !== null) {
       for (const key of currentSchema.required) {
@@ -53,13 +102,56 @@ export function validateAgainstSchema(value, schema, pathLabel = '$') {
     if (currentSchema.items && Array.isArray(current)) {
       current.forEach((item, index) => visit(item, currentSchema.items, `${label}[${index}]`));
     }
+    if (currentSchema.additionalProperties === false && isPlainObject(current)) {
+      const allowed = new Set(Object.keys(currentSchema.properties || {}));
+      for (const key of Object.keys(current)) {
+        if (!allowed.has(key)) errors.push(`${label}.${key} is not allowed`);
+      }
+    }
+    if (isPlainObject(currentSchema.additionalProperties) && isPlainObject(current)) {
+      const explicit = new Set(Object.keys(currentSchema.properties || {}));
+      for (const [key, item] of Object.entries(current)) {
+        if (!explicit.has(key)) visit(item, currentSchema.additionalProperties, `${label}.${key}`);
+      }
+    }
   }
   visit(value, schema, pathLabel);
   return errors;
 }
 
+export function validateSettings(settings) {
+  const schema = readJson(SETTINGS_SCHEMA_PATH);
+  const errors = validateAgainstSchema(settings, schema, '$');
+  if (settings?.astGrep?.command === 'sg') errors.push('$.astGrep.command must be ast-grep or another explicit executable, not sg');
+  if (errors.length) {
+    const error = new Error(`settings schema validation failed: ${errors.slice(0, 8).join('; ')}`);
+    error.validationErrors = errors;
+    throw error;
+  }
+  return settings;
+}
+
+export function loadSettings(repoRoot = process.cwd(), opts = {}) {
+  const defaultPath = opts.defaultSettingsPath || process.env.CODE_INTEL_DEFAULT_SETTINGS_PATH || DEFAULT_SETTINGS_PATH;
+  const userPath = opts.userSettingsPath || process.env.CODE_INTEL_USER_SETTINGS_PATH || USER_SETTINGS_PATH;
+  const projectPath = opts.projectSettingsPath || process.env.CODE_INTEL_PROJECT_SETTINGS_PATH || path.join(path.resolve(repoRoot), '.code-intel', 'settings.json');
+  const defaults = readJson(defaultPath);
+  const user = readJsonIfExists(expandHome(userPath));
+  const project = readJsonIfExists(expandHome(projectPath));
+  const merged = validateSettings(deepMerge(deepMerge(defaults, user || {}), project || {}));
+  Object.defineProperty(merged, 'sources', {
+    enumerable: false,
+    value: {
+      default: defaultPath,
+      user: user ? expandHome(userPath) : null,
+      project: project ? expandHome(projectPath) : null
+    }
+  });
+  return merged;
+}
+
 export function validateRegistry(registry) {
-  const schema = readJson(DEFAULT_SCHEMA_PATH);
+  const schema = readJson(path.join(ROOT, 'adapters', 'schema.json'));
   const errors = validateAgainstSchema(registry, schema, '$');
   if (errors.length) {
     const error = new Error(`adapter registry schema validation failed: ${errors.slice(0, 8).join('; ')}`);
@@ -70,7 +162,7 @@ export function validateRegistry(registry) {
 }
 
 export function loadRegistry() {
-  return validateRegistry(readJson(process.env.CODE_INTEL_REGISTRY_PATH || DEFAULT_REGISTRY_PATH));
+  return validateRegistry(readJson(process.env.CODE_INTEL_REGISTRY_PATH || path.join(ROOT, 'adapters', 'registry.json')));
 }
 
 export function detectExecutable(command, args = ['--version']) {
