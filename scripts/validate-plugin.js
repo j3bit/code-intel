@@ -142,6 +142,54 @@ try {
 } finally {
   fs.rmSync(settingsMergeRoot, { recursive: true, force: true });
 }
+const malformedSettingsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-malformed-settings-'));
+try {
+  const userSettingsPath = path.join(malformedSettingsRoot, 'user-settings.json');
+  const projectRoot = path.join(malformedSettingsRoot, 'repo');
+  fs.mkdirSync(projectRoot, { recursive: true });
+  writeJson(userSettingsPath, []);
+  try {
+    loadSettings(projectRoot, { userSettingsPath });
+    check('settings rejects non-object user settings root', false, 'non-object user settings root was accepted');
+  } catch (error) {
+    check(
+      'settings rejects non-object user settings root',
+      /settings schema|user settings root|expected object/.test(error.message),
+      error.message
+    );
+  }
+} finally {
+  fs.rmSync(malformedSettingsRoot, { recursive: true, force: true });
+}
+const settingsExpansionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-settings-expansion-'));
+const originalHome = process.env.HOME;
+try {
+  const fakeHome = path.join(settingsExpansionRoot, 'home');
+  const userSettingsPath = path.join(settingsExpansionRoot, 'user-settings.json');
+  const projectRoot = path.join(settingsExpansionRoot, 'repo');
+  fs.mkdirSync(projectRoot, { recursive: true });
+  process.env.HOME = fakeHome;
+  writeJson(userSettingsPath, {
+    version: 1,
+    path: { extraDirs: ['~/code-intel-bin'] },
+    astGrep: { configPath: '~/.codex/code-intel/sgconfig.yml' }
+  });
+  const expanded = loadSettings(projectRoot, { userSettingsPath });
+  check(
+    'settings expands home in ast-grep config path',
+    expanded.astGrep.configPath === path.join(fakeHome, '.codex', 'code-intel', 'sgconfig.yml'),
+    expanded.astGrep.configPath
+  );
+  check(
+    'settings expands home in path extraDirs',
+    expanded.path.extraDirs[0] === path.join(fakeHome, 'code-intel-bin'),
+    JSON.stringify(expanded.path.extraDirs)
+  );
+} finally {
+  if (originalHome === undefined) delete process.env.HOME;
+  else process.env.HOME = originalHome;
+  fs.rmSync(settingsExpansionRoot, { recursive: true, force: true });
+}
 check('scripts executable or documented', ['scripts/init-code-intel.js','scripts/doctor-code-intel.js','scripts/validate-plugin.js'].every((f) => fs.statSync(path.join(ROOT, f)).mode & 0o111), 'init/doctor/validate executable');
 
 // MCP contract validation

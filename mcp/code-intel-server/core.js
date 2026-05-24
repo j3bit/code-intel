@@ -63,6 +63,31 @@ function readJsonIfExists(file) {
   return readJson(file);
 }
 
+function settingsSourceError(source, file, message) {
+  const error = new Error(`settings schema validation failed: ${source} settings ${message}: ${file}`);
+  error.validationErrors = [`${source} settings ${message}: ${file}`];
+  return error;
+}
+
+function readSettingsOverrideIfExists(file, source) {
+  const settings = readJsonIfExists(file);
+  if (settings === null) return null;
+  if (!isPlainObject(settings)) {
+    throw settingsSourceError(source, file, `root expected object but got ${typeOf(settings)}`);
+  }
+  return settings;
+}
+
+function normalizeSettingsPaths(settings) {
+  if (typeof settings?.astGrep?.configPath === 'string') {
+    settings.astGrep.configPath = expandHome(settings.astGrep.configPath);
+  }
+  if (Array.isArray(settings?.path?.extraDirs)) {
+    settings.path.extraDirs = settings.path.extraDirs.map(expandHome);
+  }
+  return settings;
+}
+
 export function validateAgainstSchema(value, schema, pathLabel = '$') {
   const errors = [];
   function visit(current, currentSchema, label) {
@@ -136,15 +161,17 @@ export function loadSettings(repoRoot = process.cwd(), opts = {}) {
   const userPath = opts.userSettingsPath || process.env.CODE_INTEL_USER_SETTINGS_PATH || USER_SETTINGS_PATH;
   const projectPath = opts.projectSettingsPath || process.env.CODE_INTEL_PROJECT_SETTINGS_PATH || path.join(path.resolve(repoRoot), '.code-intel', 'settings.json');
   const defaults = readJson(defaultPath);
-  const user = readJsonIfExists(expandHome(userPath));
-  const project = readJsonIfExists(expandHome(projectPath));
-  const merged = validateSettings(deepMerge(deepMerge(defaults, user || {}), project || {}));
+  const expandedUserPath = expandHome(userPath);
+  const expandedProjectPath = expandHome(projectPath);
+  const user = readSettingsOverrideIfExists(expandedUserPath, 'user');
+  const project = readSettingsOverrideIfExists(expandedProjectPath, 'project');
+  const merged = validateSettings(normalizeSettingsPaths(deepMerge(deepMerge(defaults, user || {}), project || {})));
   Object.defineProperty(merged, 'sources', {
     enumerable: false,
     value: {
       default: defaultPath,
-      user: user ? expandHome(userPath) : null,
-      project: project ? expandHome(projectPath) : null
+      user: user ? expandedUserPath : null,
+      project: project ? expandedProjectPath : null
     }
   });
   return merged;
