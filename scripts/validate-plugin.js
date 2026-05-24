@@ -270,6 +270,70 @@ try {
 } finally {
   fs.rmSync(emptyToolPathRoot, { recursive: true, force: true });
 }
+const extraPathAstRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-extra-path-ast-'));
+try {
+  const emptyPathDir = path.join(extraPathAstRoot, 'empty-path');
+  const extraAstDir = path.join(extraPathAstRoot, 'extra-bin');
+  const astSettingsPath = path.join(extraPathAstRoot, 'settings.json');
+  fs.mkdirSync(emptyPathDir, { recursive: true });
+  fs.mkdirSync(extraAstDir, { recursive: true });
+  const fakeAstGrep = path.join(extraAstDir, 'ast-grep');
+  fs.writeFileSync(fakeAstGrep, `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--version" ]; then
+    echo "ast-grep fake-extra-dir"
+    exit 0
+  fi
+done
+printf '%s\n' '[{"file":"extra.py","text":"fake match","language":"Python"}]'
+`);
+  fs.chmodSync(fakeAstGrep, 0o755);
+  writeJson(astSettingsPath, {
+    version: 1,
+    path: { extraDirs: [extraAstDir] },
+    astGrep: { command: 'ast-grep' }
+  });
+  const extraAstEnv = { ...process.env, PATH: emptyPathDir, CODE_INTEL_PROJECT_SETTINGS_PATH: astSettingsPath };
+  const extraAstDiscoveryProbe = run(process.execPath, ['mcp/code-intel-server/index.js', '--call-tool', 'capability_discover', '--args', JSON.stringify({ repoRoot: path.join(ROOT, 'fixtures/repos/python-basic') })], {
+    env: extraAstEnv
+  });
+  const extraAstDiscovery = JSON.parse(extraAstDiscoveryProbe.stdout || '{}');
+  check(
+    'ast-grep discovery consults settings path extraDirs',
+    extraAstDiscovery.tools?.astGrep?.available === true &&
+      extraAstDiscovery.tools.astGrep.command === 'ast-grep' &&
+      extraAstDiscovery.tools.astGrep.resolvedCommand === fakeAstGrep,
+    extraAstDiscoveryProbe.stdout.slice(0, 800) || extraAstDiscoveryProbe.stderr.slice(0, 800)
+  );
+  const extraAstSearchProbe = run(process.execPath, ['mcp/code-intel-server/index.js', '--call-tool', 'ast_grep_search', '--args', JSON.stringify({ repoRoot: path.join(ROOT, 'fixtures/repos/python-basic'), language: 'python', pattern: 'Greeter()', maxResults: 5 })], {
+    env: extraAstEnv
+  });
+  const extraAstSearch = JSON.parse(extraAstSearchProbe.stdout || '{}');
+  check(
+    'ast-grep search executes command from settings path extraDirs',
+    extraAstSearch.status === 'ok' &&
+      extraAstSearch.executable === 'ast-grep' &&
+      extraAstSearch.resolvedCommand === fakeAstGrep &&
+      extraAstSearch.results?.length === 1,
+    extraAstSearchProbe.stdout.slice(0, 800) || extraAstSearchProbe.stderr.slice(0, 800)
+  );
+  const extraAstFallbackProbe = run(process.execPath, ['mcp/code-intel-server/index.js', '--call-tool', 'lsp_symbols', '--args', JSON.stringify({ repoRoot: ROOT, language: 'json', file: 'package.json' })], {
+    env: extraAstEnv
+  });
+  const extraAstFallback = JSON.parse(extraAstFallbackProbe.stdout || '{}');
+  check(
+    'LSP fallback detection consults ast-grep settings path extraDirs',
+    extraAstFallback.status === 'unavailable' &&
+      extraAstFallback.fallbackUsed === 'ast-grep or rg/grep',
+    extraAstFallbackProbe.stdout.slice(0, 800) || extraAstFallbackProbe.stderr.slice(0, 800)
+  );
+} catch (error) {
+  check('ast-grep discovery consults settings path extraDirs', false, error.message);
+  check('ast-grep search executes command from settings path extraDirs', false, error.message);
+  check('LSP fallback detection consults ast-grep settings path extraDirs', false, error.message);
+} finally {
+  fs.rmSync(extraPathAstRoot, { recursive: true, force: true });
+}
 const fakeLspRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-fake-lsp-'));
 try {
   const fakeBinDir = path.join(fakeLspRoot, 'bin');
