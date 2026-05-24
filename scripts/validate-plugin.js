@@ -423,6 +423,67 @@ printf '%s\n' '[{"file":"extra.py","text":"fake match","language":"Python"}]'
 } finally {
   fs.rmSync(extraPathAstRoot, { recursive: true, force: true });
 }
+const relativeExtraPathAstRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-relative-extra-path-ast-'));
+try {
+  const outsideCwd = path.join(relativeExtraPathAstRoot, 'outside-cwd');
+  const targetRepo = path.join(relativeExtraPathAstRoot, 'repo');
+  const repoBin = path.join(targetRepo, 'bin');
+  const projectSettingsDir = path.join(targetRepo, '.code-intel');
+  fs.mkdirSync(outsideCwd, { recursive: true });
+  fs.mkdirSync(repoBin, { recursive: true });
+  fs.mkdirSync(projectSettingsDir, { recursive: true });
+  fs.writeFileSync(path.join(targetRepo, 'extra.py'), 'print("extra")\n');
+  const fakeAstGrep = path.join(repoBin, 'ast-grep');
+  fs.writeFileSync(fakeAstGrep, `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--version" ]; then
+    echo "ast-grep fake-relative-extra-dir"
+    exit 0
+  fi
+done
+printf '%s\n' '[{"file":"extra.py","text":"fake relative match","language":"Python"}]'
+`);
+  fs.chmodSync(fakeAstGrep, 0o755);
+  writeJson(path.join(projectSettingsDir, 'settings.json'), {
+    version: 1,
+    path: { extraDirs: ['./bin'] },
+    astGrep: { command: 'ast-grep' }
+  });
+  const relativeAstEnv = {
+    ...process.env,
+    PATH: path.join(relativeExtraPathAstRoot, 'empty-path'),
+    CODE_INTEL_USER_SETTINGS_PATH: path.join(relativeExtraPathAstRoot, 'missing-user-settings.json')
+  };
+  fs.mkdirSync(relativeAstEnv.PATH, { recursive: true });
+  const relativeAstDiscoveryProbe = run(process.execPath, [path.join(ROOT, 'mcp/code-intel-server/index.js'), '--call-tool', 'capability_discover', '--args', JSON.stringify({ repoRoot: targetRepo })], {
+    cwd: outsideCwd,
+    env: relativeAstEnv
+  });
+  const relativeAstDiscovery = JSON.parse(relativeAstDiscoveryProbe.stdout || '{}');
+  check(
+    'ast-grep discovery resolves relative extraDirs from repoRoot',
+    relativeAstDiscovery.tools?.astGrep?.available === true &&
+      relativeAstDiscovery.tools.astGrep.resolvedCommand === fakeAstGrep,
+    relativeAstDiscoveryProbe.stdout.slice(0, 800) || relativeAstDiscoveryProbe.stderr.slice(0, 800)
+  );
+  const relativeAstSearchProbe = run(process.execPath, [path.join(ROOT, 'mcp/code-intel-server/index.js'), '--call-tool', 'ast_grep_search', '--args', JSON.stringify({ repoRoot: targetRepo, language: 'python', pattern: 'print($A)', maxResults: 5 })], {
+    cwd: outsideCwd,
+    env: relativeAstEnv
+  });
+  const relativeAstSearch = JSON.parse(relativeAstSearchProbe.stdout || '{}');
+  check(
+    'ast-grep search executes relative extraDirs command from repoRoot',
+    relativeAstSearch.status === 'ok' &&
+      relativeAstSearch.resolvedCommand === fakeAstGrep &&
+      relativeAstSearch.results?.length === 1,
+    relativeAstSearchProbe.stdout.slice(0, 800) || relativeAstSearchProbe.stderr.slice(0, 800)
+  );
+} catch (error) {
+  check('ast-grep discovery resolves relative extraDirs from repoRoot', false, error.message);
+  check('ast-grep search executes relative extraDirs command from repoRoot', false, error.message);
+} finally {
+  fs.rmSync(relativeExtraPathAstRoot, { recursive: true, force: true });
+}
 const fakeLspRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-fake-lsp-'));
 try {
   const fakeBinDir = path.join(fakeLspRoot, 'bin');
@@ -606,6 +667,70 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
   check('LSP tools execute repo-relative command candidates from repoRoot', false, error.message);
 } finally {
   fs.rmSync(relativeLspRoot, { recursive: true, force: true });
+}
+const relativeExtraPathLspRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-relative-extra-path-lsp-'));
+try {
+  const outsideCwd = path.join(relativeExtraPathLspRoot, 'outside-cwd');
+  const targetRepo = path.join(relativeExtraPathLspRoot, 'repo');
+  const repoBin = path.join(targetRepo, 'bin');
+  const projectSettingsDir = path.join(targetRepo, '.code-intel');
+  fs.mkdirSync(outsideCwd, { recursive: true });
+  fs.mkdirSync(path.join(targetRepo, 'src'), { recursive: true });
+  fs.mkdirSync(repoBin, { recursive: true });
+  fs.mkdirSync(projectSettingsDir, { recursive: true });
+  fs.writeFileSync(path.join(targetRepo, 'src', 'math.ts'), 'export function add(a: number, b: number) { return a + b; }\n');
+
+  const localLsp = path.join(repoBin, 'fake-local-lsp');
+  fs.writeFileSync(localLsp, `#!/usr/bin/env node
+await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-lsp-server.js')).href)});
+`);
+  fs.chmodSync(localLsp, 0o755);
+
+  writeJson(path.join(projectSettingsDir, 'settings.json'), {
+    version: 1,
+    path: { extraDirs: ['./bin'] },
+    astGrep: { command: 'ast-grep', configPath: null },
+    fallback: ['rg', 'grep'],
+    languages: {
+      typescript: {
+        extensions: ['.ts'],
+        astGrep: { languageId: 'typescript' },
+        lsp: { commands: ['fake-local-lsp --stdio'], capabilities: ['symbols'] }
+      }
+    }
+  });
+
+  const relativeExtraEnv = {
+    ...process.env,
+    CODE_INTEL_USER_SETTINGS_PATH: path.join(relativeExtraPathLspRoot, 'missing-user-settings.json')
+  };
+  const relativeExtraDiscoveryProbe = run(process.execPath, [path.join(ROOT, 'mcp/code-intel-server/index.js'), '--call-tool', 'capability_discover', '--args', JSON.stringify({ repoRoot: targetRepo })], {
+    cwd: outsideCwd,
+    env: relativeExtraEnv
+  });
+  const relativeExtraDiscovery = JSON.parse(relativeExtraDiscoveryProbe.stdout || '{}');
+  check(
+    'LSP executable detection resolves relative extraDirs from repoRoot',
+    relativeExtraDiscovery.languages?.typescript?.lsp === 'commandDetected' &&
+      relativeExtraDiscovery.languages.typescript.lspCommands?.[0]?.executablePath === localLsp,
+    relativeExtraDiscoveryProbe.stdout.slice(0, 800) || relativeExtraDiscoveryProbe.stderr.slice(0, 800)
+  );
+
+  const relativeExtraLspProbe = run(process.execPath, [path.join(ROOT, 'mcp/code-intel-server/index.js'), '--call-tool', 'lsp_symbols', '--args', JSON.stringify({ repoRoot: targetRepo, file: 'src/math.ts' })], {
+    cwd: outsideCwd,
+    env: relativeExtraEnv
+  });
+  const relativeExtraLspOutput = JSON.parse(relativeExtraLspProbe.stdout || '{}');
+  check(
+    'LSP tools execute relative extraDirs command from repoRoot',
+    relativeExtraLspProbe.status === 0 && relativeExtraLspOutput.status === 'ok' && relativeExtraLspOutput.lspState === 'methodVerified',
+    relativeExtraLspProbe.stdout.slice(0, 800) || relativeExtraLspProbe.stderr.slice(0, 800)
+  );
+} catch (error) {
+  check('LSP executable detection resolves relative extraDirs from repoRoot', false, error.message);
+  check('LSP tools execute relative extraDirs command from repoRoot', false, error.message);
+} finally {
+  fs.rmSync(relativeExtraPathLspRoot, { recursive: true, force: true });
 }
 const strictLspRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-strict-lsp-'));
 try {

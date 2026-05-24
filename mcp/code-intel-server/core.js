@@ -51,6 +51,12 @@ function expandHome(value) {
   return value;
 }
 
+function resolveExtraDir(dir, repoRoot = process.cwd()) {
+  const expanded = expandHome(dir);
+  if (!expanded) return expanded;
+  return path.isAbsolute(expanded) ? expanded : path.resolve(repoRoot, expanded);
+}
+
 function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
@@ -210,7 +216,7 @@ function executableCandidates(command, baseDir = process.cwd(), settings = null)
   if (hasPathSeparator) {
     return names.map((name) => path.isAbsolute(name) ? name : path.resolve(baseDir, name));
   }
-  const extraDirs = (settings?.path?.extraDirs || []).map(expandHome);
+  const extraDirs = (settings?.path?.extraDirs || []).map((dir) => resolveExtraDir(dir, baseDir));
   const dirs = [...extraDirs, ...(process.env.PATH || '').split(path.delimiter).filter(Boolean)];
   return dirs.flatMap((dir) => names.map((name) => path.join(dir, name)));
 }
@@ -251,8 +257,8 @@ function detectExecutableFromSettings(command, args = ['--version'], baseDir = p
   };
 }
 
-function envWithExtraPathDirs(env = process.env, extraDirs = []) {
-  const dirs = (extraDirs || []).map(expandHome).filter(Boolean);
+function envWithExtraPathDirs(env = process.env, extraDirs = [], repoRoot = process.cwd()) {
+  const dirs = (extraDirs || []).map((dir) => resolveExtraDir(dir, repoRoot)).filter(Boolean);
   if (!dirs.length) return env;
   return { ...env, PATH: [...dirs, env.PATH || ''].filter(Boolean).join(path.delimiter) };
 }
@@ -807,7 +813,7 @@ export function runLspRequest(commandLine, languageRuntime, method, args = {}) {
     encoding: 'utf8',
     timeout: (workerArgs.timeoutMs || 10000) + 5000,
     maxBuffer: 10 * 1024 * 1024,
-    env: envWithExtraPathDirs(process.env, workerArgs.settingsPathExtraDirs)
+    env: envWithExtraPathDirs(process.env, workerArgs.settingsPathExtraDirs, workerArgs.repoRoot || process.cwd())
   });
   if (worker.status === 0 && worker.stdout) {
     try { return JSON.parse(worker.stdout); } catch {}
