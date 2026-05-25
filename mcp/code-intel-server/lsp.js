@@ -281,11 +281,34 @@ export function lspTool(method, args = {}) {
 }
 
 export function lspDiagnosticsForFile(repoRoot, file, settings, timeoutMs) {
-  const resolved = languageConfigForFile(path.resolve(repoRoot, file), settings);
+  const effectiveSettings = settings || loadSettings(repoRoot);
+  const resolved = languageConfigForFile(path.resolve(repoRoot, file), effectiveSettings);
   if (!resolved.config) {
     return { file, status: 'unavailable', language: null, fallbackReason: 'unsupported language or file extension' };
   }
-  const result = lspTool('textDocument/diagnostic', { repoRoot, file, language: resolved.language, timeoutMs });
+  const { command } = findLspCommand({ repoRoot, file, language: resolved.language }, effectiveSettings);
+  if (!command) {
+    const unavailable = lspUnavailable('textDocument/diagnostic', { repoRoot, file, language: resolved.language }, 'LSP command missing', { settings: effectiveSettings });
+    return {
+      file,
+      language: resolved.language,
+      status: unavailable.status,
+      method: unavailable.method,
+      result: null,
+      fallbackUsed: unavailable.fallbackUsed || null,
+      fallbackReason: unavailable.fallbackReason || null,
+      stderrSummary: unavailable.stderrSummary || ''
+    };
+  }
+  const languageRuntime = { language: resolved.language, ...resolved.config };
+  const result = runLspRequest(command, languageRuntime, 'textDocument/diagnostic', {
+    repoRoot,
+    file,
+    language: resolved.language,
+    timeoutMs,
+    settings: { astGrep: effectiveSettings.astGrep, path: effectiveSettings.path },
+    settingsPathExtraDirs: effectiveSettings.path.extraDirs
+  });
   return {
     file,
     language: resolved.language,

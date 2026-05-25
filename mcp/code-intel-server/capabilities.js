@@ -207,9 +207,9 @@ export function runtimeFallbackUsed(config, settings = null, baseDir = process.c
   return 'rg/grep';
 }
 
-export function findLspCommand(args = {}) {
+export function findLspCommand(args = {}, settingsOverride = null) {
   const repoRoot = path.resolve(args.repoRoot || process.cwd());
-  const settings = loadSettings(repoRoot);
+  const settings = settingsOverride || loadSettings(repoRoot);
   const resolved = args.language
     ? languageConfigForLanguage(args.language, settings)
     : args.file

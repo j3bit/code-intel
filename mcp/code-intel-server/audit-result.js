@@ -9,13 +9,26 @@ export function formatPostEditAuditResult({
   fallbackReason = null
 }) {
   const scan = astGrepScan || { status: 'unavailable', results: [], fallbackReason: 'audit did not request ast-grep scan' };
-  const degraded = diagnostics.some((row) => row.status !== 'ok') || scan.status !== 'ok';
+  const astGrepFindingCount = Array.isArray(scan.results) ? scan.results.length : 0;
+  const lspDiagnosticFindingCount = diagnostics.reduce((count, row) => {
+    const result = row?.result;
+    if (Array.isArray(result?.items)) return count + result.items.length;
+    if (Array.isArray(result)) return count + result.length;
+    return count;
+  }, 0);
+  const findingCount = astGrepFindingCount + lspDiagnosticFindingCount;
+  const hasFindings = findingCount > 0;
+  const degraded = diagnostics.some((row) => row.status !== 'ok') || scan.status !== 'ok' || hasFindings;
   return {
     status,
     repoRoot,
     files,
     fileSource,
     fileSourceFallbackReason,
+    findingCount,
+    hasFindings,
+    astGrepFindingCount,
+    lspDiagnosticFindingCount,
     diagnostics,
     astGrepScan: scan,
     fallbackReason: fallbackReason || (degraded ? 'one or more audit checks were unavailable, degraded, or reported findings' : null)

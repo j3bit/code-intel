@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { tools, callTool, loadSettings, validateSettings, splitCommandLine } from '../mcp/code-intel-server/core.js';
+import { tools, callTool, loadSettings, validateSettings, splitCommandLine, lspDiagnosticsForFile, postEditAudit } from '../mcp/code-intel-server/core.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const EXPECTED_TOOLS = ['capability_discover','capability_route','ast_grep_search','ast_grep_scan','ast_grep_replace_preview','post_edit_audit','lsp_diagnostics','lsp_symbols','lsp_goto_definition','lsp_find_references','lsp_prepare_rename','lsp_rename_preview'];
@@ -972,6 +972,116 @@ check(
     ['ok', 'unavailable', 'error'].includes(auditResult.astGrepScan.status),
   JSON.stringify(auditResult.astGrepScan).slice(0, 1000)
 );
+const auditFindingRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-audit-finding-'));
+try {
+  fs.mkdirSync(path.join(auditFindingRoot, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(auditFindingRoot, 'src', 'finding.ts'), 'console.log("finding");\n');
+  const findingAudit = postEditAudit(
+    { repoRoot: auditFindingRoot, files: ['src/finding.ts'], timeoutMs: 1000 },
+    {
+      loadSettings: () => ({
+        version: 1,
+        path: { extraDirs: [] },
+        astGrep: { command: 'ast-grep', configPath: './sgconfig.yml' },
+        fallback: ['rg', 'grep'],
+        languages: {
+          typescript: {
+            extensions: ['.ts'],
+            astGrep: { languageId: 'typescript' },
+            lsp: { commands: [], capabilities: ['diagnostics'] }
+          }
+        }
+      }),
+      lspDiagnosticsForFile: (repoRoot, file) => ({
+        file,
+        language: 'typescript',
+        status: 'ok',
+        method: 'textDocument/diagnostic',
+        result: { kind: 'full', items: [] },
+        fallbackUsed: null,
+        fallbackReason: null,
+        stderrSummary: ''
+      }),
+      astGrepScan: () => ({
+        status: 'ok',
+        results: [{ file: 'src/finding.ts', ruleId: 'local.no-console', message: 'console.log found', severity: 'warning' }],
+        fallback: [],
+        fallbackReason: null
+      })
+    }
+  );
+  check(
+    'post_edit_audit reports AST findings at top level',
+    findingAudit.status === 'ok' &&
+      findingAudit.astGrepScan?.status === 'ok' &&
+      findingAudit.astGrepScan.results.length === 1 &&
+      findingAudit.findingCount === 1 &&
+      findingAudit.hasFindings === true &&
+      /reported findings/.test(findingAudit.fallbackReason || ''),
+    JSON.stringify(findingAudit).slice(0, 1000)
+  );
+} finally {
+  fs.rmSync(auditFindingRoot, { recursive: true, force: true });
+}
+const auditLspSettingsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-audit-lsp-settings-'));
+try {
+  const repoRoot = path.join(auditLspSettingsRoot, 'repo');
+  fs.mkdirSync(path.join(repoRoot, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(repoRoot, 'src', 'main.ts'), 'export const value = 1;\n');
+  const envSettingsPath = path.join(auditLspSettingsRoot, 'env-settings.json');
+  writeJson(envSettingsPath, {
+    version: 1,
+    path: { extraDirs: [] },
+    astGrep: { command: 'missing-ast-grep-for-audit', configPath: null },
+    fallback: ['rg', 'grep'],
+    languages: {
+      typescript: {
+        extensions: ['.ts'],
+        astGrep: { languageId: 'typescript' },
+        lsp: { commands: [`node "${path.join(ROOT, 'fixtures/lsp/fake-lsp-server.js')}"`], capabilities: ['diagnostics'] }
+      }
+    }
+  });
+  const passedSettings = {
+    version: 1,
+    path: { extraDirs: [] },
+    astGrep: { command: 'missing-ast-grep-for-audit', configPath: null },
+    fallback: ['rg', 'grep'],
+    languages: {
+      typescript: {
+        extensions: ['.ts'],
+        astGrep: { languageId: 'typescript' },
+        lsp: { commands: [], capabilities: ['diagnostics'] }
+      }
+    }
+  };
+  const originalDefaultSettingsPath = process.env.CODE_INTEL_DEFAULT_SETTINGS_PATH;
+  const originalUserSettingsPath = process.env.CODE_INTEL_USER_SETTINGS_PATH;
+  const originalProjectSettingsPath = process.env.CODE_INTEL_PROJECT_SETTINGS_PATH;
+  let isolatedDiagnostics;
+  try {
+    process.env.CODE_INTEL_DEFAULT_SETTINGS_PATH = envSettingsPath;
+    process.env.CODE_INTEL_USER_SETTINGS_PATH = path.join(auditLspSettingsRoot, 'missing-user-settings.json');
+    process.env.CODE_INTEL_PROJECT_SETTINGS_PATH = path.join(auditLspSettingsRoot, 'missing-project-settings.json');
+    isolatedDiagnostics = lspDiagnosticsForFile(repoRoot, 'src/main.ts', passedSettings, 1000);
+  } finally {
+    if (originalDefaultSettingsPath === undefined) delete process.env.CODE_INTEL_DEFAULT_SETTINGS_PATH;
+    else process.env.CODE_INTEL_DEFAULT_SETTINGS_PATH = originalDefaultSettingsPath;
+    if (originalUserSettingsPath === undefined) delete process.env.CODE_INTEL_USER_SETTINGS_PATH;
+    else process.env.CODE_INTEL_USER_SETTINGS_PATH = originalUserSettingsPath;
+    if (originalProjectSettingsPath === undefined) delete process.env.CODE_INTEL_PROJECT_SETTINGS_PATH;
+    else process.env.CODE_INTEL_PROJECT_SETTINGS_PATH = originalProjectSettingsPath;
+  }
+  check(
+    'lspDiagnosticsForFile honors passed settings over environment settings',
+    isolatedDiagnostics.status === 'unavailable' &&
+      isolatedDiagnostics.language === 'typescript' &&
+      isolatedDiagnostics.fallbackReason === 'LSP command missing',
+    JSON.stringify(isolatedDiagnostics).slice(0, 1000)
+  );
+} finally {
+  fs.rmSync(auditLspSettingsRoot, { recursive: true, force: true });
+}
 const auditGitRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-audit-git-'));
 try {
   fs.mkdirSync(path.join(auditGitRoot, 'src'), { recursive: true });
