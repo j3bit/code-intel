@@ -280,6 +280,24 @@ export function lspTool(method, args = {}) {
   return runLspRequest(command, languageRuntime, method, { ...args, settings: { astGrep: settings.astGrep, path: settings.path }, settingsPathExtraDirs: settings.path.extraDirs });
 }
 
+export function lspDiagnosticsForFile(repoRoot, file, settings, timeoutMs) {
+  const resolved = languageConfigForFile(path.resolve(repoRoot, file), settings);
+  if (!resolved.config) {
+    return { file, status: 'unavailable', language: null, fallbackReason: 'unsupported language or file extension' };
+  }
+  const result = lspTool('textDocument/diagnostic', { repoRoot, file, language: resolved.language, timeoutMs });
+  return {
+    file,
+    language: resolved.language,
+    status: result.status,
+    method: result.method || 'textDocument/diagnostic',
+    result: result.result || null,
+    fallbackUsed: result.fallbackUsed || null,
+    fallbackReason: result.fallbackReason || null,
+    stderrSummary: result.stderrSummary || ''
+  };
+}
+
 export async function runLspWorkerCli() {
   let input = '';
   for await (const chunk of process.stdin) input += chunk;

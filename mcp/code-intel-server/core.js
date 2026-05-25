@@ -3,4 +3,6 @@ export * from './repo.js';
 export * from './capabilities.js';
 export * from './ast-grep.js';
 export * from './lsp.js';
+export * from './audit.js';
+export * from './audit-result.js';
 export * from './tools.js';

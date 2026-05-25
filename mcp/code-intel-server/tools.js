@@ -1,5 +1,6 @@
 import { discoverCapabilities, resolveCapabilityRoute } from './capabilities.js';
 import { astGrepSearch, astGrepScan, astGrepReplacePreview } from './ast-grep.js';
+import { postEditAudit } from './audit.js';
 import { lspTool } from './lsp.js';
 
 export const TOOL_NAMES = [
@@ -8,6 +9,7 @@ export const TOOL_NAMES = [
   'ast_grep_search',
   'ast_grep_scan',
   'ast_grep_replace_preview',
+  'post_edit_audit',
   'lsp_diagnostics',
   'lsp_symbols',
   'lsp_goto_definition',
@@ -23,6 +25,7 @@ export function callTool(name, args = {}) {
     case 'ast_grep_search': return astGrepSearch(args);
     case 'ast_grep_scan': return astGrepScan(args);
     case 'ast_grep_replace_preview': return astGrepReplacePreview(args);
+    case 'post_edit_audit': return postEditAudit(args);
     case 'lsp_diagnostics': return lspTool('textDocument/diagnostic', args);
     case 'lsp_symbols': return lspTool('textDocument/documentSymbol', args);
     case 'lsp_goto_definition': return lspTool('textDocument/definition', args);
@@ -68,6 +71,14 @@ export const tools = TOOL_NAMES.map((name) => {
     base.description = 'Preview structural replacement candidates without mutating files.';
     base.inputSchema.required = ['pattern', 'language', 'replacement'];
     base.inputSchema.properties = { repoRoot: commonProps.repoRoot, pattern: { type: 'string' }, language: commonProps.language, replacement: { type: 'string' }, maxResults: { type: 'number' } };
+  } else if (name === 'post_edit_audit') {
+    base.description = 'Run explicit post-edit audit: LSP diagnostics per file when available and ast-grep rule scan when configured.';
+    base.inputSchema.properties = {
+      repoRoot: commonProps.repoRoot,
+      files: { type: 'array', items: { type: 'string' } },
+      timeoutMs: { type: 'number' },
+      maxResults: { type: 'number' }
+    };
   } else {
     base.description = `Check or preview LSP operation ${name}; degrades gracefully when no server is available.`;
     base.inputSchema.properties = { repoRoot: commonProps.repoRoot, language: commonProps.language, file: commonProps.file, position: commonProps.position, symbol: { type: 'string' }, newName: { type: 'string' } };

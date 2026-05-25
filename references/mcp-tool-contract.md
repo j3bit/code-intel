@@ -9,6 +9,7 @@ Initial tools:
 - `ast_grep_search`
 - `ast_grep_scan`
 - `ast_grep_replace_preview`
+- `post_edit_audit`
 - `lsp_diagnostics`
 - `lsp_symbols`
 - `lsp_goto_definition`

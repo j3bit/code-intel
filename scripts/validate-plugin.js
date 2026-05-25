@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tools, callTool, loadSettings, validateSettings, splitCommandLine } from '../mcp/code-intel-server/core.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const EXPECTED_TOOLS = ['capability_discover','capability_route','ast_grep_search','ast_grep_scan','ast_grep_replace_preview','lsp_diagnostics','lsp_symbols','lsp_goto_definition','lsp_find_references','lsp_prepare_rename','lsp_rename_preview'];
+const EXPECTED_TOOLS = ['capability_discover','capability_route','ast_grep_search','ast_grep_scan','ast_grep_replace_preview','post_edit_audit','lsp_diagnostics','lsp_symbols','lsp_goto_definition','lsp_find_references','lsp_prepare_rename','lsp_rename_preview'];
 const SKILLS = ['code-intel','init-code-intel','code-intel-doctor','code-intel-refactor'];
 const REFS = ['routing-policy.md','settings-contract.md','fallback-policy.md','mcp-tool-contract.md','hook-contract.md'];
 const results = [];
@@ -318,6 +318,8 @@ const requiredServerModules = [
   'capabilities.js',
   'ast-grep.js',
   'lsp.js',
+  'audit.js',
+  'audit-result.js',
   'tools.js'
 ];
 for (const moduleFile of requiredServerModules) {
@@ -945,6 +947,245 @@ check(
     (previewResult.patchCandidates || []).every((candidate) => candidate.confidence === 'ast-grep'),
   JSON.stringify(previewResult).slice(0, 500)
 );
+let auditResult;
+try {
+  auditResult = callTool('post_edit_audit', {
+    repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'),
+    files: ['src/math.ts'],
+    timeoutMs: 5000
+  });
+} catch (error) {
+  auditResult = { status: 'error', diagnostics: [], astGrepScan: null, fallbackReason: error.message };
+}
+check(
+  'post_edit_audit returns per-file diagnostic evidence or fallback',
+  auditResult.status === 'ok' &&
+    auditResult.files.includes('src/math.ts') &&
+    Array.isArray(auditResult.diagnostics) &&
+    auditResult.diagnostics.some((row) => row.file === 'src/math.ts' && ['ok', 'unavailable', 'error'].includes(row.status)),
+  JSON.stringify(auditResult).slice(0, 1000)
+);
+check(
+  'post_edit_audit reports AST scan availability separately',
+  auditResult.status === 'ok' &&
+    auditResult.astGrepScan &&
+    ['ok', 'unavailable', 'error'].includes(auditResult.astGrepScan.status),
+  JSON.stringify(auditResult.astGrepScan).slice(0, 1000)
+);
+const auditGitRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-audit-git-'));
+try {
+  fs.mkdirSync(path.join(auditGitRoot, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(auditGitRoot, 'src', 'changed.ts'), 'export const value: number = 1;\n');
+  run('git', ['init'], { cwd: auditGitRoot });
+  run('git', ['config', 'user.email', 'code-intel@example.invalid'], { cwd: auditGitRoot });
+  run('git', ['config', 'user.name', 'Code Intel'], { cwd: auditGitRoot });
+  run('git', ['add', 'src/changed.ts'], { cwd: auditGitRoot });
+  run('git', ['commit', '-m', 'seed'], { cwd: auditGitRoot });
+  fs.writeFileSync(path.join(auditGitRoot, 'src', 'changed.ts'), 'export const value: number = 2;\n');
+  const auditSettingsPath = path.join(auditGitRoot, 'settings.json');
+  writeJson(auditSettingsPath, {
+    version: 1,
+    path: { extraDirs: [] },
+    astGrep: { command: 'missing-ast-grep-for-audit', configPath: null },
+    fallback: ['rg', 'grep'],
+    languages: {
+      typescript: {
+        extensions: ['.ts'],
+        astGrep: { languageId: 'typescript' },
+        lsp: { commands: [], capabilities: ['diagnostics'] }
+      }
+    }
+  });
+  run('git', ['add', 'settings.json'], { cwd: auditGitRoot });
+  run('git', ['commit', '-m', 'settings'], { cwd: auditGitRoot });
+  const originalAuditDefaultSettingsPath = process.env.CODE_INTEL_DEFAULT_SETTINGS_PATH;
+  const originalAuditUserSettingsPath = process.env.CODE_INTEL_USER_SETTINGS_PATH;
+  const originalAuditProjectSettingsPath = process.env.CODE_INTEL_PROJECT_SETTINGS_PATH;
+  let gitAudit;
+  try {
+    process.env.CODE_INTEL_DEFAULT_SETTINGS_PATH = auditSettingsPath;
+    process.env.CODE_INTEL_USER_SETTINGS_PATH = path.join(auditGitRoot, 'missing-user-settings.json');
+    process.env.CODE_INTEL_PROJECT_SETTINGS_PATH = path.join(auditGitRoot, 'missing-project-settings.json');
+    try { gitAudit = callTool('post_edit_audit', { repoRoot: auditGitRoot, timeoutMs: 1000 }); }
+    catch (error) { gitAudit = { status: 'error', files: [], diagnostics: [], astGrepScan: null, fallbackReason: error.message }; }
+  } finally {
+    if (originalAuditDefaultSettingsPath === undefined) delete process.env.CODE_INTEL_DEFAULT_SETTINGS_PATH;
+    else process.env.CODE_INTEL_DEFAULT_SETTINGS_PATH = originalAuditDefaultSettingsPath;
+    if (originalAuditUserSettingsPath === undefined) delete process.env.CODE_INTEL_USER_SETTINGS_PATH;
+    else process.env.CODE_INTEL_USER_SETTINGS_PATH = originalAuditUserSettingsPath;
+    if (originalAuditProjectSettingsPath === undefined) delete process.env.CODE_INTEL_PROJECT_SETTINGS_PATH;
+    else process.env.CODE_INTEL_PROJECT_SETTINGS_PATH = originalAuditProjectSettingsPath;
+  }
+  check(
+    'post_edit_audit discovers git changed files with isolated settings',
+    gitAudit.status === 'ok' &&
+      gitAudit.fileSource === 'git diff' &&
+      gitAudit.files.includes('src/changed.ts') &&
+      gitAudit.diagnostics.some((row) => row.file === 'src/changed.ts' && row.status === 'unavailable' && row.fallbackReason === 'LSP command missing') &&
+      gitAudit.astGrepScan?.status === 'unavailable' &&
+      /configPath/.test(gitAudit.astGrepScan.fallbackReason || ''),
+    JSON.stringify(gitAudit).slice(0, 1000)
+  );
+} finally {
+  fs.rmSync(auditGitRoot, { recursive: true, force: true });
+}
+const auditUntrackedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-audit-untracked-'));
+try {
+  fs.mkdirSync(path.join(auditUntrackedRoot, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(auditUntrackedRoot, 'README.md'), '# seed\n');
+  run('git', ['init'], { cwd: auditUntrackedRoot });
+  run('git', ['config', 'user.email', 'code-intel@example.invalid'], { cwd: auditUntrackedRoot });
+  run('git', ['config', 'user.name', 'Code Intel'], { cwd: auditUntrackedRoot });
+  run('git', ['add', 'README.md'], { cwd: auditUntrackedRoot });
+  run('git', ['commit', '-m', 'seed'], { cwd: auditUntrackedRoot });
+  const auditSettingsPath = path.join(auditUntrackedRoot, 'settings.json');
+  writeJson(auditSettingsPath, {
+    version: 1,
+    path: { extraDirs: [] },
+    astGrep: { command: 'missing-ast-grep-for-audit', configPath: null },
+    fallback: ['rg', 'grep'],
+    languages: {
+      typescript: {
+        extensions: ['.ts'],
+        astGrep: { languageId: 'typescript' },
+        lsp: { commands: [], capabilities: ['diagnostics'] }
+      }
+    }
+  });
+  run('git', ['add', 'settings.json'], { cwd: auditUntrackedRoot });
+  run('git', ['commit', '-m', 'settings'], { cwd: auditUntrackedRoot });
+  fs.writeFileSync(path.join(auditUntrackedRoot, 'src', 'new.ts'), 'export const value = 1;\n');
+  const originalAuditDefaultSettingsPath = process.env.CODE_INTEL_DEFAULT_SETTINGS_PATH;
+  const originalAuditUserSettingsPath = process.env.CODE_INTEL_USER_SETTINGS_PATH;
+  const originalAuditProjectSettingsPath = process.env.CODE_INTEL_PROJECT_SETTINGS_PATH;
+  let untrackedAudit;
+  try {
+    process.env.CODE_INTEL_DEFAULT_SETTINGS_PATH = auditSettingsPath;
+    process.env.CODE_INTEL_USER_SETTINGS_PATH = path.join(auditUntrackedRoot, 'missing-user-settings.json');
+    process.env.CODE_INTEL_PROJECT_SETTINGS_PATH = path.join(auditUntrackedRoot, 'missing-project-settings.json');
+    try { untrackedAudit = callTool('post_edit_audit', { repoRoot: auditUntrackedRoot, timeoutMs: 1000 }); }
+    catch (error) { untrackedAudit = { status: 'error', files: [], diagnostics: [], astGrepScan: null, fallbackReason: error.message }; }
+  } finally {
+    if (originalAuditDefaultSettingsPath === undefined) delete process.env.CODE_INTEL_DEFAULT_SETTINGS_PATH;
+    else process.env.CODE_INTEL_DEFAULT_SETTINGS_PATH = originalAuditDefaultSettingsPath;
+    if (originalAuditUserSettingsPath === undefined) delete process.env.CODE_INTEL_USER_SETTINGS_PATH;
+    else process.env.CODE_INTEL_USER_SETTINGS_PATH = originalAuditUserSettingsPath;
+    if (originalAuditProjectSettingsPath === undefined) delete process.env.CODE_INTEL_PROJECT_SETTINGS_PATH;
+    else process.env.CODE_INTEL_PROJECT_SETTINGS_PATH = originalAuditProjectSettingsPath;
+  }
+  check(
+    'post_edit_audit includes untracked git files',
+    untrackedAudit.status === 'ok' &&
+      untrackedAudit.files.includes('src/new.ts') &&
+      untrackedAudit.diagnostics.some((row) => row.file === 'src/new.ts'),
+    JSON.stringify(untrackedAudit).slice(0, 1000)
+  );
+} finally {
+  fs.rmSync(auditUntrackedRoot, { recursive: true, force: true });
+}
+function writeNoScanAuditSettings(root, markerFile) {
+  const binDir = path.join(root, 'bin');
+  fs.mkdirSync(binDir, { recursive: true });
+  const fakeAstGrep = path.join(binDir, 'ast-grep');
+  fs.writeFileSync(fakeAstGrep, `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--version" ]; then
+    echo "ast-grep fake-audit"
+    exit 0
+  fi
+done
+echo "called" > ${JSON.stringify(markerFile)}
+printf '%s\n' '[]'
+`);
+  fs.chmodSync(fakeAstGrep, 0o755);
+  const settingsPath = path.join(root, 'settings.json');
+  writeJson(settingsPath, {
+    version: 1,
+    path: { extraDirs: [binDir] },
+    astGrep: { command: 'ast-grep', configPath: './sgconfig.yml' },
+    fallback: ['rg', 'grep'],
+    languages: {}
+  });
+  fs.writeFileSync(path.join(root, 'sgconfig.yml'), 'ruleDirs: []\n');
+  return settingsPath;
+}
+const auditNoChangeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-audit-no-change-'));
+try {
+  fs.writeFileSync(path.join(auditNoChangeRoot, 'README.md'), '# seed\n');
+  run('git', ['init'], { cwd: auditNoChangeRoot });
+  run('git', ['config', 'user.email', 'code-intel@example.invalid'], { cwd: auditNoChangeRoot });
+  run('git', ['config', 'user.name', 'Code Intel'], { cwd: auditNoChangeRoot });
+  run('git', ['add', 'README.md'], { cwd: auditNoChangeRoot });
+  run('git', ['commit', '-m', 'seed'], { cwd: auditNoChangeRoot });
+  const markerFile = path.join(auditNoChangeRoot, 'ast-grep-called');
+  const settingsPath = writeNoScanAuditSettings(auditNoChangeRoot, markerFile);
+  run('git', ['add', 'bin/ast-grep', 'settings.json', 'sgconfig.yml'], { cwd: auditNoChangeRoot });
+  run('git', ['commit', '-m', 'settings'], { cwd: auditNoChangeRoot });
+  const originalAuditDefaultSettingsPath = process.env.CODE_INTEL_DEFAULT_SETTINGS_PATH;
+  const originalAuditUserSettingsPath = process.env.CODE_INTEL_USER_SETTINGS_PATH;
+  const originalAuditProjectSettingsPath = process.env.CODE_INTEL_PROJECT_SETTINGS_PATH;
+  let noChangeAudit;
+  try {
+    process.env.CODE_INTEL_DEFAULT_SETTINGS_PATH = settingsPath;
+    process.env.CODE_INTEL_USER_SETTINGS_PATH = path.join(auditNoChangeRoot, 'missing-user-settings.json');
+    process.env.CODE_INTEL_PROJECT_SETTINGS_PATH = path.join(auditNoChangeRoot, 'missing-project-settings.json');
+    try { noChangeAudit = callTool('post_edit_audit', { repoRoot: auditNoChangeRoot, timeoutMs: 1000 }); }
+    catch (error) { noChangeAudit = { status: 'error', files: [], diagnostics: [], astGrepScan: null, fallbackReason: error.message }; }
+  } finally {
+    if (originalAuditDefaultSettingsPath === undefined) delete process.env.CODE_INTEL_DEFAULT_SETTINGS_PATH;
+    else process.env.CODE_INTEL_DEFAULT_SETTINGS_PATH = originalAuditDefaultSettingsPath;
+    if (originalAuditUserSettingsPath === undefined) delete process.env.CODE_INTEL_USER_SETTINGS_PATH;
+    else process.env.CODE_INTEL_USER_SETTINGS_PATH = originalAuditUserSettingsPath;
+    if (originalAuditProjectSettingsPath === undefined) delete process.env.CODE_INTEL_PROJECT_SETTINGS_PATH;
+    else process.env.CODE_INTEL_PROJECT_SETTINGS_PATH = originalAuditProjectSettingsPath;
+  }
+  check(
+    'post_edit_audit skips ast-grep scan when git has no changed files',
+    noChangeAudit.status === 'ok' &&
+      noChangeAudit.files.length === 0 &&
+      noChangeAudit.astGrepScan?.status === 'unavailable' &&
+      /no changed files/.test(noChangeAudit.astGrepScan.fallbackReason || '') &&
+      !fs.existsSync(markerFile),
+    JSON.stringify(noChangeAudit).slice(0, 1000)
+  );
+} finally {
+  fs.rmSync(auditNoChangeRoot, { recursive: true, force: true });
+}
+const auditNonGitRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-audit-non-git-'));
+try {
+  fs.writeFileSync(path.join(auditNonGitRoot, 'README.md'), '# seed\n');
+  const markerFile = path.join(auditNonGitRoot, 'ast-grep-called');
+  const settingsPath = writeNoScanAuditSettings(auditNonGitRoot, markerFile);
+  const originalAuditDefaultSettingsPath = process.env.CODE_INTEL_DEFAULT_SETTINGS_PATH;
+  const originalAuditUserSettingsPath = process.env.CODE_INTEL_USER_SETTINGS_PATH;
+  const originalAuditProjectSettingsPath = process.env.CODE_INTEL_PROJECT_SETTINGS_PATH;
+  let nonGitAudit;
+  try {
+    process.env.CODE_INTEL_DEFAULT_SETTINGS_PATH = settingsPath;
+    process.env.CODE_INTEL_USER_SETTINGS_PATH = path.join(auditNonGitRoot, 'missing-user-settings.json');
+    process.env.CODE_INTEL_PROJECT_SETTINGS_PATH = path.join(auditNonGitRoot, 'missing-project-settings.json');
+    try { nonGitAudit = callTool('post_edit_audit', { repoRoot: auditNonGitRoot, timeoutMs: 1000 }); }
+    catch (error) { nonGitAudit = { status: 'error', files: [], diagnostics: [], astGrepScan: null, fallbackReason: error.message }; }
+  } finally {
+    if (originalAuditDefaultSettingsPath === undefined) delete process.env.CODE_INTEL_DEFAULT_SETTINGS_PATH;
+    else process.env.CODE_INTEL_DEFAULT_SETTINGS_PATH = originalAuditDefaultSettingsPath;
+    if (originalAuditUserSettingsPath === undefined) delete process.env.CODE_INTEL_USER_SETTINGS_PATH;
+    else process.env.CODE_INTEL_USER_SETTINGS_PATH = originalAuditUserSettingsPath;
+    if (originalAuditProjectSettingsPath === undefined) delete process.env.CODE_INTEL_PROJECT_SETTINGS_PATH;
+    else process.env.CODE_INTEL_PROJECT_SETTINGS_PATH = originalAuditProjectSettingsPath;
+  }
+  check(
+    'post_edit_audit skips ast-grep scan when git discovery fails',
+    nonGitAudit.status === 'ok' &&
+      nonGitAudit.files.length === 0 &&
+      nonGitAudit.astGrepScan?.status === 'unavailable' &&
+      /git diff failed/.test(nonGitAudit.astGrepScan.fallbackReason || '') &&
+      !fs.existsSync(markerFile),
+    JSON.stringify(nonGitAudit).slice(0, 1000)
+  );
+} finally {
+  fs.rmSync(auditNonGitRoot, { recursive: true, force: true });
+}
 
 // Init workflow validation
 const initTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-fixtures-'));
@@ -1161,6 +1402,9 @@ const behavior = [
 ];
 const routingPolicy = fs.readFileSync(path.join(ROOT, 'references/routing-policy.md'), 'utf8') + fs.readFileSync(path.join(ROOT, 'references/fallback-policy.md'), 'utf8');
 for (const [name, expectation] of behavior) check(`behavior documented: ${name}`, expectation.split(/,? then |, | and | with /).some((token) => routingPolicy.toLowerCase().includes(token.trim().toLowerCase().split(' ')[0])), expectation);
+const mcpToolContract = fs.readFileSync(path.join(ROOT, 'references/mcp-tool-contract.md'), 'utf8');
+const undocumentedTools = EXPECTED_TOOLS.filter((tool) => !mcpToolContract.includes(`\`${tool}\``));
+check('MCP tool contract documents every expected tool', undocumentedTools.length === 0, undocumentedTools.join(', ') || 'all documented');
 
 // No forbidden command path in executable/config surfaces.
 const scanFiles = [];

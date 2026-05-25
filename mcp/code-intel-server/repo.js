@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 export function walkFiles(repoRoot, max = 5000) {
   const out = [];
@@ -53,4 +54,24 @@ export function resolveRepoRelativePaths(repoRoot, files = []) {
     paths.push(path.relative(resolved.repoRoot, resolved.filePath));
   }
   return { ok: true, paths, reason: null };
+}
+
+export function gitChangedFiles(repoRoot) {
+  const diff = spawnSync('git', ['-C', repoRoot, 'diff', '--name-only', '--diff-filter=ACMRTUXB', 'HEAD', '--'], {
+    encoding: 'utf8',
+    timeout: 5000,
+    maxBuffer: 1024 * 1024
+  });
+  if (diff.status !== 0) return { files: [], reason: 'git diff failed; pass files explicitly for post_edit_audit' };
+  const untracked = spawnSync('git', ['-C', repoRoot, 'ls-files', '--others', '--exclude-standard'], {
+    encoding: 'utf8',
+    timeout: 5000,
+    maxBuffer: 1024 * 1024
+  });
+  const files = [
+    ...diff.stdout.split(/\r?\n/),
+    ...(untracked.status === 0 ? untracked.stdout.split(/\r?\n/) : [])
+  ].map((line) => line.trim()).filter(Boolean);
+  const uniqueFiles = [...new Set(files)];
+  return { files: uniqueFiles, reason: uniqueFiles.length ? null : 'no changed files detected by git diff or untracked scan' };
 }
