@@ -929,7 +929,13 @@ try {
 
 // Hook validation
 const hookManifest = readJson('hooks/hooks.json');
-check('hook manifest wires soft hook commands', ['UserPromptSubmit','PreToolUse','PostToolUse'].every((hook) => JSON.stringify(hookManifest.hooks?.[hook] || '').includes('${PLUGIN_ROOT}/hooks/')), JSON.stringify(hookManifest).slice(0, 500));
+check(
+  'hook manifest wires only prompt-time soft hook',
+  JSON.stringify(hookManifest.hooks?.UserPromptSubmit || '').includes('${PLUGIN_ROOT}/hooks/user-prompt-submit.js') &&
+    !hookManifest.hooks?.PreToolUse &&
+    !hookManifest.hooks?.PostToolUse,
+  JSON.stringify(hookManifest).slice(0, 500)
+);
 function parseHookOutput(stdout) {
   if (!stdout.trim()) return { ok: true, empty: true, value: null, evidence: 'empty stdout' };
   try {
@@ -950,24 +956,16 @@ function validSoftHookOutput(stdout, expected) {
     hookSpecificOutput.hookEventName === expected &&
     typeof hookSpecificOutput.additionalContext === 'string' &&
     hookSpecificOutput.additionalContext.includes('code-intel') &&
-    hookSpecificOutput.additionalContext.length < 500;
+    hookSpecificOutput.additionalContext.length < 360;
   return { ok, evidence: ok ? hookSpecificOutput.additionalContext : JSON.stringify({ unknownTopLevel, value: parsed.value }).slice(0, 800) };
 }
-const hookCases = [
-  ['hooks/user-prompt-submit.js', 'rename symbol and find references', 'UserPromptSubmit'],
-  ['hooks/pre-tool-use.js', '{"cmd":"rg class Foo"}', 'PreToolUse'],
-  ['hooks/post-tool-use.js', '{"tool":"apply_patch","status":"changed"}', 'PostToolUse']
-];
-for (const [hook, input, expected] of hookCases) {
-  const r = run('node', [hook], { input });
-  const result = validSoftHookOutput(r.stdout, expected);
-  check(`${expected} emits Codex-compatible short JSON nudge`, r.status === 0 && result.ok, result.evidence || r.stderr);
-}
-const preAllow = run('node', ['hooks/pre-tool-use.js'], { input: '{"cmd":"rg TODO"}' });
-check('PreToolUse does not block ordinary rg', preAllow.status === 0, `stdout bytes=${preAllow.stdout.length}`);
-const preManualReplace = run('node', ['hooks/pre-tool-use.js'], { input: '{"tool":"apply_patch","description":"replace function add with sum across files"}' });
-const preManualReplaceResult = validSoftHookOutput(preManualReplace.stdout, 'PreToolUse');
-check('PreToolUse nudges manual structural replace/edit patterns', preManualReplace.status === 0 && preManualReplaceResult.ok, preManualReplaceResult.evidence || preManualReplace.stderr);
+const promptHook = run('node', ['hooks/user-prompt-submit.js'], { input: 'rename symbol and find references' });
+const promptHookResult = validSoftHookOutput(promptHook.stdout, 'UserPromptSubmit');
+check('UserPromptSubmit emits one short Codex-compatible JSON hint', promptHook.status === 0 && promptHookResult.ok, promptHookResult.evidence || promptHook.stderr);
+const ordinaryPromptHook = run('node', ['hooks/user-prompt-submit.js'], { input: 'summarize the README' });
+check('UserPromptSubmit stays silent for non-code-intel prompts', ordinaryPromptHook.status === 0 && ordinaryPromptHook.stdout.trim() === '', ordinaryPromptHook.stdout);
+check('PreToolUse hook script retired', !exists('hooks/pre-tool-use.js'), 'hooks/pre-tool-use.js');
+check('PostToolUse hook script retired', !exists('hooks/post-tool-use.js'), 'hooks/post-tool-use.js');
 const splitFrame = await new Promise((resolve) => {
   const child = spawn(process.execPath, ['mcp/code-intel-server/index.js'], {
     cwd: ROOT,
