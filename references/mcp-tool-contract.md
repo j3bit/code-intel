@@ -1,6 +1,6 @@
 # MCP Tool Contract
 
-The MCP server exposes stable tool names, descriptions, input schemas, and output schemas. Preview tools never mutate repository files. Replacement preview is match-only unless executable validation proves safe metavariable substitution; match-only candidates must not pretend to be directly applicable `after` text.
+The MCP server exposes stable tool names, descriptions, input schemas, and output schemas. Preview tools never mutate repository files. Audit tools report available checks and explicit unavailable/fallback reasons; they do not edit repository files. Replacement preview is match-only unless executable validation proves safe metavariable substitution; match-only candidates must not pretend to be directly applicable `after` text.
 
 Initial tools:
 

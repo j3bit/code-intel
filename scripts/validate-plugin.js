@@ -1391,16 +1391,23 @@ check(
 
 // Behavior scenarios
 const behavior = [
+  ['route decision', 'capability_route'],
   ['find class or function definition', 'lsp when available, else ast-grep, else rg'],
   ['find references', 'lsp_find_references, then ast_grep_search, then rg'],
   ['rename symbol', 'lsp_prepare_rename and lsp_rename_preview, else preview fallback'],
   ['rewrite structural pattern', 'ast_grep_replace_preview only, then normal edits'],
-  ['edit file then run diagnostics', 'lsp_diagnostics when available'],
+  ['rule-based AST audit', 'ast_grep_scan'],
+  ['edit file then audit', 'post_edit_audit'],
   ['unsupported language fallback', 'rg/grep with reason'],
   ['missing ast-grep fallback', 'rg/grep with reason'],
   ['missing LSP fallback', 'ast-grep or rg/grep with reason']
 ];
-const routingPolicy = fs.readFileSync(path.join(ROOT, 'references/routing-policy.md'), 'utf8') + fs.readFileSync(path.join(ROOT, 'references/fallback-policy.md'), 'utf8');
+const routingPolicy = [
+  fs.readFileSync(path.join(ROOT, 'references/routing-policy.md'), 'utf8'),
+  fs.readFileSync(path.join(ROOT, 'references/fallback-policy.md'), 'utf8'),
+  fs.readFileSync(path.join(ROOT, 'references/mcp-tool-contract.md'), 'utf8'),
+  fs.readFileSync(path.join(ROOT, 'docs/project-direction.md'), 'utf8')
+].join('\n');
 for (const [name, expectation] of behavior) check(`behavior documented: ${name}`, expectation.split(/,? then |, | and | with /).some((token) => routingPolicy.toLowerCase().includes(token.trim().toLowerCase().split(' ')[0])), expectation);
 const mcpToolContract = fs.readFileSync(path.join(ROOT, 'references/mcp-tool-contract.md'), 'utf8');
 const undocumentedTools = EXPECTED_TOOLS.filter((tool) => !mcpToolContract.includes(`\`${tool}\``));

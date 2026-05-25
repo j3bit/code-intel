@@ -37,40 +37,55 @@ The plugin should remain standalone and behavior-first:
 `code-intel` has four cooperating layers:
 
 1. **MCP capability layer** — exposes actual code-intelligence tools that can be
-   attached independently of any orchestration runtime.
+   attached independently of any orchestration runtime. Its public surface is
+   composed from focused modules: settings, repo path safety, capability
+   routing, ast-grep, LSP, audit orchestration, audit result formatting, and MCP
+   tool dispatch. `core.js` stays a compatibility facade rather than a place for
+   new workflows.
 2. **Skill behavior layer** — teaches agents when to prefer code-intel for
    search, navigation, references, rename, rewrite, diagnostics, and audits.
-3. **Optional hook layer** — provides short deterministic nudges for structural
-   intent, text-search detours, manual replacements, and post-edit checks.
+3. **Optional hook layer** — provides at most a short prompt-time routing hint
+   for structural or semantic code intent. It must not inject repeated pre-tool
+   or post-tool reminders.
 4. **Settings and reporting layer** — keeps language coverage declarative in
    settings defaults/schema and writes durable capability evidence for future
    turns.
 
-Hooks may improve routing, but the MCP server and skills must remain useful when
-hooks are absent. Generated routing profiles are hints, not authority; live tool
-failures and method-specific responses override stale cached data.
+Hooks may improve discovery, but the MCP server and skills must remain useful
+when hooks are absent. Generated routing profiles are hints, not authority; live
+tool failures and method-specific responses override stale cached data.
+
+The MCP layer should preserve Clean Architecture boundaries: drivers such as
+git, ast-grep, and LSP subprocesses remain behind module gateways; use cases
+coordinate those gateways; tool schemas and result formatting stay separate from
+subprocess implementation details.
 
 ## Core Capabilities
 
 The project should keep the following capabilities first-class:
 
-1. **Capability discovery** — identify repository languages, available
-   `ast-grep`, LSP command candidates, method-readiness evidence, and fallback
-   status.
+1. **Capability discovery and routing** — identify repository languages,
+   available `ast-grep`, LSP command candidates, method-readiness evidence,
+   fallback status, and the recommended route for a requested intent.
 2. **Structural search** — use `ast_grep_search` for parseable AST patterns when
    effective settings define an ast-grep language id for the language.
-3. **Semantic navigation** — use LSP for definitions, references, symbols, and
+3. **Rule-based AST audit** — use `ast_grep_scan` when effective settings define
+   `astGrep.configPath`.
+4. **Semantic navigation** — use LSP for definitions, references, symbols, and
    diagnostics only when the server interaction proves method readiness.
-4. **Safe refactor previews** — expose rename and rewrite intent as preview
+5. **Safe refactor previews** — expose rename and rewrite intent as preview
    flows before normal edits are applied.
-5. **Post-change verification** — encourage diagnostics or structural/text
-   audits after edits, especially after refactors.
+6. **Post-change verification** — expose `post_edit_audit` so diagnostics and
+   AST scan evidence are run explicitly instead of requested through repeated
+   hook reminders.
 
 ## Routing Contracts
 
 Every user-visible route should be explicit about the path used and the fallback
 reason when degraded.
 
+- **Route decision:** use `capability_route` to make the first route explicit
+  when semantic, structural, diagnostics, rename, or audit intent is unclear.
 - **Structural search:** try AST search when effective settings define an
   ast-grep language id; supplement with `rg`/`grep` for strings, filenames,
   logs, generated files, unsupported languages, incomplete AST output, or
@@ -81,8 +96,11 @@ reason when degraded.
 - **Rename and rewrite:** try `lsp_prepare_rename` and `lsp_rename_preview` for
   rename; use `ast_grep_replace_preview` only for previewable structural
   rewrites; otherwise use normal manual edits plus text/structural audits.
-- **Post-edit validation:** after normal edits, prefer LSP diagnostics when
-  available and use AST/text audits when diagnostics are missing or inconclusive.
+- **Rule-based audit:** use `ast_grep_scan` when `astGrep.configPath` is
+  configured; report missing config as a degraded audit surface.
+- **Post-edit validation:** after normal edits, run `post_edit_audit` with the
+  edited repo-relative files; report which LSP diagnostics and AST scan checks
+  ran, degraded, or were unavailable.
 - **Stale profiles:** treat repo-root mismatch, plugin version drift, settings
   source/version drift, missing timestamps, and major language-inventory
   mismatches as stale-profile signals; use live evidence and suggest refreshing
@@ -126,20 +144,24 @@ Required validation surfaces:
 - **Plugin structure:** manifest, skills, MCP registration, settings defaults,
   settings schema, references, executable scripts, and hook manifest.
 - **MCP contract:** server startup, framed initialize, tool listing, stable tool
-  schemas, clean unavailable responses, and non-mutating preview tools.
+  schemas, clean unavailable responses, explicit route decisions, audit tools,
+  and non-mutating preview tools.
 - **AST behavior:** `ast-grep` detection, built-in-language smoke search,
-  structured result rows, unsupported-language fallback, invalid-pattern
-  fallback, and no executable/config path calling `sg`.
+  configured rule scan, structured result rows, unsupported-language fallback,
+  invalid-pattern fallback, missing-config fallback, and no executable/config
+  path calling `sg`.
 - **LSP behavior:** command detection without requiring `--version`, initialize
   ordering, repo-relative command resolution, method request/response smoke,
   path-safety checks, clean shutdown, and explicit failure reasons.
 - **Init and doctor:** report generation, semantic idempotency, stale-profile
   detection, malformed-profile survival, and visible fallback recommendations.
-- **Hooks:** short pure input/output nudges, no blocking of `rg`/`grep` or normal
-  edits, safe behavior when no routing profile exists.
-- **Behavior scenarios:** executable route tests for definition lookup,
-  references, rename preview, structural rewrite preview, post-edit diagnostics,
-  unsupported language fallback, missing `ast-grep`, and missing LSP.
+- **Hooks:** one short prompt-time input/output nudge, no lifecycle reminder
+  spam, no blocking of `rg`/`grep` or normal edits, and safe behavior when no
+  routing profile exists.
+- **Behavior scenarios:** executable route tests for route decision, definition
+  lookup, references, rename preview, structural rewrite preview, rule-based
+  AST audit, post-edit audit, unsupported language fallback, missing `ast-grep`,
+  and missing LSP.
 
 A validation check that only confirms documentation wording is weaker than a
 check that executes the relevant tool route. Prefer executable scenario tests
@@ -151,7 +173,8 @@ when they can be kept deterministic and dependency-light.
 - Keep fallback reporting visible in both tools and documentation.
 - Treat `ast-grep` as the canonical executable name.
 - Preserve standalone operation; avoid coupling the plugin to one workflow style.
-- Keep hooks short, deterministic, and optional.
+- Keep hooks short, deterministic, prompt-time only, and optional.
+- Use explicit MCP audit tools instead of repeated lifecycle reminders.
 - Keep preview tools honest: distinguish executable edits from match-only
   candidates, and never imply a replacement is safe unless the substituted output
   has been proven.
@@ -162,33 +185,40 @@ when they can be kept deterministic and dependency-light.
 
 ## Roadmap Priorities
 
-### 1. Reliability Before Breadth
+### 1. Low-Noise OMO-Style Operation
+
+Move repeated lifecycle guidance out of hooks and into explicit MCP tools and
+skill workflows. Prompt-time hooks may help discovery, but route decisions,
+rule scans, and post-edit audits should be actual tool calls with structured
+results and fallback reasons.
+
+### 2. Reliability Before Breadth
 
 Strengthen MCP framing, LSP lifecycle handling, path safety, timeout behavior,
 and degraded responses before adding many languages. A small set of reliable
 settings-backed language definitions is more valuable than broad but unreliable
 coverage.
 
-### 2. Honest Preview Workflows
+### 3. Honest Preview Workflows
 
 Improve replacement and rename previews so they clearly distinguish executable
 edits from match-only candidates. Never imply that a replacement is safe to
 apply unless the tool has proven the substituted output.
 
-### 3. Better Repository Initialization
+### 4. Better Repository Initialization
 
 Make `init-code-intel` produce concise, durable reports that help future agents
 choose the right route quickly: supported languages, known missing tools,
 validated methods, stale-profile signals, and recommended fallback commands.
 
-### 4. Language Settings Expansion
+### 5. Language Settings Expansion
 
 Add languages through `settings/defaults.json`, `settings/schema.json`,
 `references/settings-contract.md`, fixtures, and validation gates. Each language
 definition should document file extensions, ast-grep language id, LSP command
 candidates, capabilities, fallback behavior, and fixture expectations.
 
-### 5. Refactor Guidance
+### 6. Refactor Guidance
 
 Evolve `code-intel-refactor` into a practical workflow for mechanical changes:
 baseline diagnostics, structural/semantic preview, normal edit application, and

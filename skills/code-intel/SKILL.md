@@ -1,6 +1,6 @@
 ---
 name: code-intel
-description: Prefer language-aware code intelligence for search, navigation, references, rename, rewrite previews, and diagnostics before text fallback.
+description: Prefer language-aware code intelligence for search, navigation, references, rename, rewrite previews, diagnostics, and audits before text fallback.
 ---
 
 # Code Intel
@@ -11,12 +11,15 @@ Use this skill for codebase questions involving declarations, patterns, API usag
 
 1. Check `docs/code-intel/routing-profile.json` when present.
 2. Treat the profile as a cache, not authority. If it is missing, stale, or contradicted by live tool failures, use live discovery and suggest `init-code-intel`.
-3. Prefer LSP tools for semantic navigation and diagnostics only when the tool response verifies the method; a detected command alone is degraded evidence.
-4. Prefer `ast_grep_search` for structural patterns when the effective code-intel settings define an ast-grep language id.
-5. Use `rg`/`grep` fallback for strings, filenames, logs, generated files, unsupported languages, missing tools, or inconclusive code-intel output.
-6. Report the route and fallback reason.
+3. Use `capability_route` for explicit route decisions when the route is not obvious.
+4. Prefer LSP tools for semantic navigation and diagnostics only when the tool response verifies the method; a detected command alone is degraded evidence.
+5. Prefer `ast_grep_search` for structural patterns when the effective code-intel settings define an ast-grep language id.
+6. Prefer `ast_grep_scan` for configured rule-based AST audits when `astGrep.configPath` is set.
+7. Use `post_edit_audit` after code edits when diagnostics or audit evidence is needed before final response.
+8. Use `rg`/`grep` fallback for strings, filenames, logs, generated files, unsupported languages, missing tools, or inconclusive code-intel output.
+9. Report the route and fallback reason.
 
-## Command policy
+## Command Policy
 
 Use `ast-grep` for AST search. Do not use the Linux-conflicting shorthand command.
 
@@ -24,4 +27,4 @@ Use `ast-grep` for AST search. Do not use the Linux-conflicting shorthand comman
 
 - Read `references/routing-policy.md` when route order or stale-profile behavior matters.
 - Read `references/fallback-policy.md` when reporting degraded capability.
-- Read `references/mcp-tool-contract.md` before relying on preview or LSP tool output shapes.
+- Read `references/mcp-tool-contract.md` before relying on preview, audit, or LSP tool output shapes.
