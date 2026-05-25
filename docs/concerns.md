@@ -31,4 +31,3 @@
 - User-scope settings are `~/.codex/code-intel/settings.json`.
 - Project-scope settings are `<repoRoot>/.code-intel/settings.json`.
 - The similar names can cause confusion between user-global `code-intel` and project-local `.code-intel`.
-
