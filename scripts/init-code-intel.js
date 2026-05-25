@@ -44,7 +44,7 @@ function astGrepSmoke(repoRoot, language, info, discovery) {
   const example = discovery.inventory.languages[language]?.examples?.[0];
   if (!example) return { status: 'skipped', reason: 'no sample file detected for language' };
   const executable = discovery.tools.astGrep.resolvedCommand || discovery.tools.astGrep.command;
-  const cmdArgs = [];
+  const cmdArgs = ['run'];
   if (discovery.tools.astGrep.configPath) cmdArgs.push('--config', discovery.tools.astGrep.configPath);
   cmdArgs.push('--lang', info.astGrepLanguageId, '--pattern', '$A', '--json', path.join(repoRoot, example));
   const result = spawnSync(executable, cmdArgs, {

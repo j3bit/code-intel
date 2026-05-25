@@ -491,7 +491,7 @@ export function astGrepSearch(args = {}) {
   if (!ast.available) return astUnavailable(language || 'unknown', `${settings.astGrep.command} executable was not found on PATH`, settings);
   const lang = config?.astGrep.languageId || language;
   if (!lang) return { status: 'needs_language', error: 'language is required when path inference is not provided', results: [], fallback: settings.fallback, configPath: settings.astGrep.configPath || null };
-  const cmdArgs = [];
+  const cmdArgs = ['run'];
   if (settings.astGrep.configPath) cmdArgs.push('--config', expandHome(settings.astGrep.configPath));
   cmdArgs.push('--pattern', pattern, '--lang', lang, '--json', repoRoot);
   const result = spawnSync(ast.resolvedCommand || settings.astGrep.command, cmdArgs, { cwd: repoRoot, encoding: 'utf8', timeout: args.timeoutMs || 10000, maxBuffer: 10 * 1024 * 1024 });
