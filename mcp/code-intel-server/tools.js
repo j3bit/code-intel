@@ -4,6 +4,7 @@ import { lspTool } from './lsp.js';
 
 export const TOOL_NAMES = [
   'capability_discover',
+  'capability_route',
   'ast_grep_search',
   'ast_grep_replace_preview',
   'lsp_diagnostics',
@@ -17,6 +18,7 @@ export const TOOL_NAMES = [
 export function callTool(name, args = {}) {
   switch (name) {
     case 'capability_discover': return discoverCapabilities(args.repoRoot || process.cwd());
+    case 'capability_route': return resolveCapabilityRoute(args);
     case 'ast_grep_search': return astGrepSearch(args);
     case 'ast_grep_replace_preview': return astGrepReplacePreview(args);
     case 'lsp_diagnostics': return lspTool('textDocument/diagnostic', args);
@@ -41,6 +43,14 @@ export const tools = TOOL_NAMES.map((name) => {
   if (name === 'capability_discover') {
     base.description = 'Discover code-intel capabilities, language inventory, ast-grep availability, LSP command candidates, and fallback reasons.';
     base.inputSchema.properties = { repoRoot: commonProps.repoRoot };
+  } else if (name === 'capability_route') {
+    base.description = 'Return the recommended code-intel route for semantic, structural, rename, diagnostics, or audit intent without mutating files.';
+    base.inputSchema.properties = {
+      repoRoot: commonProps.repoRoot,
+      language: commonProps.language,
+      file: commonProps.file,
+      intent: { type: 'string', enum: ['semantic', 'structural', 'diagnostics', 'rename', 'audit'] }
+    };
   } else if (name === 'ast_grep_search') {
     base.description = 'Run preview/read-only structural search through the ast-grep executable when available.';
     base.inputSchema.required = ['pattern', 'language'];
@@ -60,5 +70,3 @@ export const tools = TOOL_NAMES.map((name) => {
   }
   return base;
 });
-
-void resolveCapabilityRoute;

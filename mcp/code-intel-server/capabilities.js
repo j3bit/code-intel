@@ -179,22 +179,25 @@ export function discoverCapabilities(repoRoot = process.cwd()) {
 }
 
 export function resolveCapabilityRoute(args = {}) {
-  const discovery = discoverCapabilities(args.repoRoot || process.cwd());
-  const settings = loadSettings(args.repoRoot || process.cwd());
-  const language = args.language || (args.file ? languageConfigForFile(path.resolve(args.repoRoot || process.cwd(), args.file), settings).language : null);
+  const repoRoot = args.repoRoot || process.cwd();
+  const discovery = discoverCapabilities(repoRoot);
+  const settings = loadSettings(repoRoot);
+  const intent = args.intent || 'structural';
+  const language = args.language || (args.file ? languageConfigForFile(path.resolve(repoRoot, args.file), settings).language : null);
   const info = language ? discovery.languages[language] : null;
+  const base = { intent, language, repoRoot: path.resolve(repoRoot) };
   if (!info) {
-    return { status: 'fallback', language, route: ['rg', 'grep'], fallbackReason: 'unsupported language or missing language hint' };
+    return { ...base, status: 'fallback', route: ['rg', 'grep'], fallbackReason: 'unsupported language or missing language hint' };
   }
-  if (args.intent === 'semantic' || args.intent === 'diagnostics' || args.intent === 'rename') {
+  if (intent === 'semantic' || intent === 'diagnostics' || intent === 'rename' || intent === 'audit') {
     if (info.lsp === 'commandDetected') {
-      return { status: 'try-lsp', language, route: ['lsp', 'ast-grep', 'rg', 'grep'], capabilityState: info.lspState, fallbackReason: 'LSP command detected; method readiness must be verified by the LSP tool response' };
+      return { ...base, status: 'try-lsp', route: ['lsp', 'ast-grep', 'rg', 'grep'], capabilityState: info.lspState, fallbackReason: 'LSP command detected; method readiness must be verified by the LSP tool response' };
     }
-    if (info.astGrep === 'available') return { status: 'try-ast-grep', language, route: ['ast-grep', 'rg', 'grep'], fallbackReason: 'LSP command missing' };
-    return { status: 'fallback', language, route: ['rg', 'grep'], fallbackReason: 'LSP and ast-grep unavailable' };
+    if (info.astGrep === 'available') return { ...base, status: 'try-ast-grep', route: ['ast-grep', 'rg', 'grep'], fallbackReason: 'LSP command missing' };
+    return { ...base, status: 'fallback', route: ['rg', 'grep'], fallbackReason: 'LSP and ast-grep unavailable' };
   }
-  if (info.astGrep === 'available') return { status: 'try-ast-grep', language, route: ['ast-grep', 'rg', 'grep'], fallbackReason: null };
-  return { status: 'fallback', language, route: ['rg', 'grep'], fallbackReason: 'ast-grep unavailable or unsupported' };
+  if (info.astGrep === 'available') return { ...base, status: 'try-ast-grep', route: ['ast-grep', 'rg', 'grep'], fallbackReason: null };
+  return { ...base, status: 'fallback', route: ['rg', 'grep'], fallbackReason: 'ast-grep unavailable or unsupported' };
 }
 
 export function runtimeFallbackUsed(config, settings = null, baseDir = process.cwd()) {

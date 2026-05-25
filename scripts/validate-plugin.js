@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tools, callTool, loadSettings, validateSettings, splitCommandLine } from '../mcp/code-intel-server/core.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const EXPECTED_TOOLS = ['capability_discover','ast_grep_search','ast_grep_replace_preview','lsp_diagnostics','lsp_symbols','lsp_goto_definition','lsp_find_references','lsp_prepare_rename','lsp_rename_preview'];
+const EXPECTED_TOOLS = ['capability_discover','capability_route','ast_grep_search','ast_grep_replace_preview','lsp_diagnostics','lsp_symbols','lsp_goto_definition','lsp_find_references','lsp_prepare_rename','lsp_rename_preview'];
 const SKILLS = ['code-intel','init-code-intel','code-intel-doctor','code-intel-refactor'];
 const REFS = ['routing-policy.md','settings-contract.md','fallback-policy.md','mcp-tool-contract.md','hook-contract.md'];
 const results = [];
@@ -341,6 +341,23 @@ for (const [pattern, reason] of forbiddenCorePatterns) {
 for (const tool of tools) check(`tool ${tool.name} schema`, Boolean(tool.name && tool.description && tool.inputSchema && tool.outputSchema), tool.description);
 const discover = callTool('capability_discover', { repoRoot: ROOT });
 check('capability_discover works', Boolean(discover.repoRoot && discover.settingsVersion === 1 && discover.tools?.astGrep?.command === 'ast-grep'), JSON.stringify({ repoRoot: discover.repoRoot, settingsVersion: discover.settingsVersion, astGrep: discover.tools?.astGrep?.command }));
+const routeSemantic = callTool('capability_route', { repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'), file: 'src/math.ts', intent: 'semantic' });
+check(
+  'capability_route exposes semantic route decision',
+  ['try-lsp', 'try-ast-grep', 'fallback'].includes(routeSemantic.status) &&
+    routeSemantic.language === 'typescript' &&
+    Array.isArray(routeSemantic.route) &&
+    routeSemantic.route.length > 0,
+  JSON.stringify(routeSemantic)
+);
+const routeAudit = callTool('capability_route', { repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'), file: 'src/math.ts', intent: 'audit' });
+check(
+  'capability_route exposes audit route decision',
+  ['try-lsp', 'try-ast-grep', 'fallback'].includes(routeAudit.status) &&
+    routeAudit.intent === 'audit' &&
+    Array.isArray(routeAudit.route),
+  JSON.stringify(routeAudit)
+);
 const windowsPathParts = splitCommandLine(String.raw`C:\Tools\pyright-langserver.cmd --stdio`);
 check(
   'splitCommandLine preserves unquoted Windows path backslashes',
