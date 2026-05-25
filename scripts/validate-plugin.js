@@ -310,6 +310,34 @@ check(
 let listed = [];
 try { listed = JSON.parse(list.stdout).tools.map((t) => t.name); } catch {}
 check('tool list includes expected tools', EXPECTED_TOOLS.every((t) => listed.includes(t)), listed.join(', '));
+
+// MCP server architecture validation
+const requiredServerModules = [
+  'settings.js',
+  'repo.js',
+  'capabilities.js',
+  'ast-grep.js',
+  'lsp.js',
+  'tools.js'
+];
+for (const moduleFile of requiredServerModules) {
+  check(`server boundary module exists: ${moduleFile}`, exists(path.join('mcp/code-intel-server', moduleFile)), moduleFile);
+}
+const coreSource = fs.readFileSync(path.join(ROOT, 'mcp/code-intel-server/core.js'), 'utf8');
+const coreLineCount = coreSource.split(/\r?\n/).length;
+check('core.js stays facade-sized', coreLineCount <= 260, `${coreLineCount} lines`);
+const forbiddenCorePatterns = [
+  [/function\s+postEditAudit\b/, 'post-edit audit use case belongs in audit.js'],
+  [/function\s+gitChangedFiles\b/, 'git changed-file driver belongs in repo.js'],
+  [/spawnSync\(['"]git['"]/, 'git subprocess calls belong in repo.js'],
+  [/textDocument\/diagnostic[\s\S]+astGrepScan/, 'audit orchestration belongs in audit.js'],
+  [/function\s+normalizeAstGrepJson\b/, 'ast-grep normalization belongs in ast-grep.js'],
+  [/function\s+lspFrame\b/, 'LSP protocol framing belongs in lsp.js']
+];
+for (const [pattern, reason] of forbiddenCorePatterns) {
+  check(`core.js boundary: ${reason}`, !pattern.test(coreSource), reason);
+}
+
 for (const tool of tools) check(`tool ${tool.name} schema`, Boolean(tool.name && tool.description && tool.inputSchema && tool.outputSchema), tool.description);
 const discover = callTool('capability_discover', { repoRoot: ROOT });
 check('capability_discover works', Boolean(discover.repoRoot && discover.settingsVersion === 1 && discover.tools?.astGrep?.command === 'ast-grep'), JSON.stringify({ repoRoot: discover.repoRoot, settingsVersion: discover.settingsVersion, astGrep: discover.tools?.astGrep?.command }));

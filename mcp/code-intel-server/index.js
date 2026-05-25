@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { callTool, tools } from './core.js';
+import { callTool, tools } from './tools.js';
 
 function json(value) { process.stdout.write(JSON.stringify(value, null, 2) + '\n'); }
 
