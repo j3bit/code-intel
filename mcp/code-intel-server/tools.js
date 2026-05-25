@@ -1,11 +1,12 @@
 import { discoverCapabilities, resolveCapabilityRoute } from './capabilities.js';
-import { astGrepSearch, astGrepReplacePreview } from './ast-grep.js';
+import { astGrepSearch, astGrepScan, astGrepReplacePreview } from './ast-grep.js';
 import { lspTool } from './lsp.js';
 
 export const TOOL_NAMES = [
   'capability_discover',
   'capability_route',
   'ast_grep_search',
+  'ast_grep_scan',
   'ast_grep_replace_preview',
   'lsp_diagnostics',
   'lsp_symbols',
@@ -20,6 +21,7 @@ export function callTool(name, args = {}) {
     case 'capability_discover': return discoverCapabilities(args.repoRoot || process.cwd());
     case 'capability_route': return resolveCapabilityRoute(args);
     case 'ast_grep_search': return astGrepSearch(args);
+    case 'ast_grep_scan': return astGrepScan(args);
     case 'ast_grep_replace_preview': return astGrepReplacePreview(args);
     case 'lsp_diagnostics': return lspTool('textDocument/diagnostic', args);
     case 'lsp_symbols': return lspTool('textDocument/documentSymbol', args);
@@ -55,6 +57,13 @@ export const tools = TOOL_NAMES.map((name) => {
     base.description = 'Run preview/read-only structural search through the ast-grep executable when available.';
     base.inputSchema.required = ['pattern', 'language'];
     base.inputSchema.properties = { repoRoot: commonProps.repoRoot, pattern: { type: 'string' }, language: commonProps.language, maxResults: { type: 'number' } };
+  } else if (name === 'ast_grep_scan') {
+    base.description = 'Run read-only ast-grep rule scan using the effective astGrep.configPath.';
+    base.inputSchema.properties = {
+      repoRoot: commonProps.repoRoot,
+      paths: { type: 'array', items: { type: 'string' } },
+      maxResults: { type: 'number' }
+    };
   } else if (name === 'ast_grep_replace_preview') {
     base.description = 'Preview structural replacement candidates without mutating files.';
     base.inputSchema.required = ['pattern', 'language', 'replacement'];

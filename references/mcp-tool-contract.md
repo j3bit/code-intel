@@ -5,7 +5,9 @@ The MCP server exposes stable tool names, descriptions, input schemas, and outpu
 Initial tools:
 
 - `capability_discover`
+- `capability_route`
 - `ast_grep_search`
+- `ast_grep_scan`
 - `ast_grep_replace_preview`
 - `lsp_diagnostics`
 - `lsp_symbols`

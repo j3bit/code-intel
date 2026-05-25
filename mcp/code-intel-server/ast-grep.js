@@ -2,6 +2,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { expandHome, loadSettings } from './settings.js';
 import { detectExecutableFromSettings, languageConfigForLanguage } from './capabilities.js';
+import { resolveRepoRelativePaths } from './repo.js';
 
 export function astUnavailable(language, reason = 'ast-grep executable was not found on PATH', settings = null) {
   return {
@@ -27,6 +28,26 @@ export function normalizeAstGrepJson(stdout, language = null) {
     language: item.language || language,
     confidence: 'ast-grep'
   }));
+}
+
+function normalizeAstGrepScanJson(stdout) {
+  if (!stdout.trim()) return [];
+  const parsed = JSON.parse(stdout);
+  const rows = Array.isArray(parsed) ? parsed : [parsed];
+  return rows.map((item) => ({
+    file: item.file || item.path || item.filePath || null,
+    range: item.range || item.labels?.[0]?.range || null,
+    message: item.message || item.note || item.text || null,
+    ruleId: item.ruleId || item.id || item.rule || null,
+    severity: item.severity || null,
+    confidence: 'ast-grep-scan'
+  }));
+}
+
+function resolveAstGrepConfigPath(settings, repoRoot) {
+  if (!settings.astGrep.configPath) return null;
+  const expanded = expandHome(settings.astGrep.configPath);
+  return path.isAbsolute(expanded) ? expanded : path.resolve(repoRoot, expanded);
 }
 
 export function astGrepSearch(args = {}) {
@@ -74,6 +95,52 @@ export function astGrepSearch(args = {}) {
     results,
     fallback: results.length ? [] : settings.fallback,
     fallbackReason: results.length ? null : 'ast-grep returned no matches; text supplement may be useful'
+  };
+}
+
+export function astGrepScan(args = {}) {
+  const repoRoot = path.resolve(args.repoRoot || process.cwd());
+  const settings = loadSettings(repoRoot);
+  const configPath = resolveAstGrepConfigPath(settings, repoRoot);
+  if (!configPath) return astUnavailable('scan', 'ast-grep configPath is required for ast_grep_scan', settings);
+  const ast = detectExecutableFromSettings(settings.astGrep.command, ['--version'], repoRoot, settings);
+  if (!ast.available) return astUnavailable('scan', `${settings.astGrep.command} executable was not found on PATH`, settings);
+  const requestedPaths = Array.isArray(args.paths) && args.paths.length ? args.paths : [];
+  const safePaths = resolveRepoRelativePaths(repoRoot, requestedPaths);
+  if (!safePaths.ok) return astUnavailable('scan', safePaths.reason, settings);
+  const scanTargets = safePaths.paths.length ? safePaths.paths : ['.'];
+  const cmdArgs = ['scan', '--config', configPath, '--json', ...scanTargets];
+  const result = spawnSync(ast.resolvedCommand || settings.astGrep.command, cmdArgs, {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    timeout: args.timeoutMs || 10000,
+    maxBuffer: 10 * 1024 * 1024
+  });
+  if (result.status !== 0 && !result.stdout) {
+    return {
+      status: 'error',
+      executable: settings.astGrep.command,
+      configPath,
+      resolvedCommand: ast.resolvedCommand,
+      stderrSummary: (result.stderr || result.error?.message || '').trim().slice(0, 1000),
+      results: [],
+      fallback: settings.fallback,
+      fallbackReason: 'ast-grep scan failed; inspect sgconfig rules or use text fallback',
+      commandPolicy: 'this plugin does not call sg'
+    };
+  }
+  let results = [];
+  try { results = normalizeAstGrepScanJson(result.stdout).slice(0, args.maxResults || 100); }
+  catch (error) { return { status: 'error', error: `failed to parse ast-grep scan JSON: ${error.message}`, raw: result.stdout.slice(0, 1000), results: [], fallback: settings.fallback, configPath }; }
+  return {
+    status: 'ok',
+    executable: settings.astGrep.command,
+    configPath,
+    resolvedCommand: ast.resolvedCommand,
+    scanned: scanTargets,
+    results,
+    fallback: results.length ? [] : settings.fallback,
+    fallbackReason: results.length ? null : 'ast-grep scan returned no findings'
   };
 }
 

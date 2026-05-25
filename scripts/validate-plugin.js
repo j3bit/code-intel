@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tools, callTool, loadSettings, validateSettings, splitCommandLine } from '../mcp/code-intel-server/core.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const EXPECTED_TOOLS = ['capability_discover','capability_route','ast_grep_search','ast_grep_replace_preview','lsp_diagnostics','lsp_symbols','lsp_goto_definition','lsp_find_references','lsp_prepare_rename','lsp_rename_preview'];
+const EXPECTED_TOOLS = ['capability_discover','capability_route','ast_grep_search','ast_grep_scan','ast_grep_replace_preview','lsp_diagnostics','lsp_symbols','lsp_goto_definition','lsp_find_references','lsp_prepare_rename','lsp_rename_preview'];
 const SKILLS = ['code-intel','init-code-intel','code-intel-doctor','code-intel-refactor'];
 const REFS = ['routing-policy.md','settings-contract.md','fallback-policy.md','mcp-tool-contract.md','hook-contract.md'];
 const results = [];
@@ -403,6 +403,102 @@ try {
   }
 } finally {
   fs.rmSync(emptyToolPathRoot, { recursive: true, force: true });
+}
+let missingScanConfig;
+const originalScanUserSettingsPath = process.env.CODE_INTEL_USER_SETTINGS_PATH;
+const originalScanProjectSettingsPath = process.env.CODE_INTEL_PROJECT_SETTINGS_PATH;
+try {
+  process.env.CODE_INTEL_USER_SETTINGS_PATH = path.join(os.tmpdir(), 'code-intel-missing-user-settings.json');
+  process.env.CODE_INTEL_PROJECT_SETTINGS_PATH = path.join(os.tmpdir(), 'code-intel-missing-project-settings.json');
+  try { missingScanConfig = callTool('ast_grep_scan', { repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic') }); }
+  catch (error) { missingScanConfig = { status: 'error', fallbackReason: error.message, fallback: [] }; }
+} finally {
+  if (originalScanUserSettingsPath === undefined) delete process.env.CODE_INTEL_USER_SETTINGS_PATH;
+  else process.env.CODE_INTEL_USER_SETTINGS_PATH = originalScanUserSettingsPath;
+  if (originalScanProjectSettingsPath === undefined) delete process.env.CODE_INTEL_PROJECT_SETTINGS_PATH;
+  else process.env.CODE_INTEL_PROJECT_SETTINGS_PATH = originalScanProjectSettingsPath;
+}
+check(
+  'ast_grep_scan reports missing configPath cleanly',
+  missingScanConfig.status === 'unavailable' &&
+    /configPath/.test(missingScanConfig.fallbackReason || '') &&
+    Array.isArray(missingScanConfig.fallback),
+  JSON.stringify(missingScanConfig)
+);
+const scanRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-scan-'));
+try {
+  fs.mkdirSync(path.join(scanRoot, 'src'), { recursive: true });
+  fs.mkdirSync(path.join(scanRoot, 'rules'), { recursive: true });
+  fs.mkdirSync(path.join(scanRoot, 'bin'), { recursive: true });
+  fs.writeFileSync(path.join(scanRoot, 'src', 'main.ts'), 'console.log("scan-me");\n');
+  fs.writeFileSync(path.join(scanRoot, 'rules', 'no-console.yml'), [
+    'id: local.no-console',
+    'message: console.log found',
+    'severity: warning',
+    'language: TypeScript',
+    'rule:',
+    '  pattern: console.log($$$ARGS)',
+    ''
+  ].join('\n'));
+  fs.writeFileSync(path.join(scanRoot, 'sgconfig.yml'), [
+    'ruleDirs:',
+    '  - rules',
+    ''
+  ].join('\n'));
+  const fakeScanAstGrep = path.join(scanRoot, 'bin', 'ast-grep');
+  fs.writeFileSync(fakeScanAstGrep, `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--version" ]; then
+    echo "ast-grep fake-scan"
+    exit 0
+  fi
+done
+printf '%s\n' '[{"file":"src/main.ts","ruleId":"local.no-console","message":"console.log found","severity":"warning"}]'
+`);
+  fs.chmodSync(fakeScanAstGrep, 0o755);
+  fs.mkdirSync(path.join(scanRoot, '.code-intel'), { recursive: true });
+  const scanSettingsPath = path.join(scanRoot, '.code-intel', 'settings.json');
+  writeJson(scanSettingsPath, {
+    version: 1,
+    path: { extraDirs: ['./bin'] },
+    astGrep: { command: 'ast-grep', configPath: './sgconfig.yml' }
+  });
+  let scanResult;
+  let unsafeScanResult;
+  let traversalScanResult;
+  const originalConfiguredScanUserSettingsPath = process.env.CODE_INTEL_USER_SETTINGS_PATH;
+  const originalConfiguredScanProjectSettingsPath = process.env.CODE_INTEL_PROJECT_SETTINGS_PATH;
+  try {
+    process.env.CODE_INTEL_USER_SETTINGS_PATH = path.join(scanRoot, 'missing-user-settings.json');
+    process.env.CODE_INTEL_PROJECT_SETTINGS_PATH = scanSettingsPath;
+    try { scanResult = callTool('ast_grep_scan', { repoRoot: scanRoot, paths: ['src/main.ts'], maxResults: 5 }); }
+    catch (error) { scanResult = { status: 'error', fallbackReason: error.message, results: [] }; }
+    try { unsafeScanResult = callTool('ast_grep_scan', { repoRoot: scanRoot, paths: [path.join(scanRoot, 'src', 'main.ts')] }); }
+    catch (error) { unsafeScanResult = { status: 'error', fallbackReason: error.message, results: [] }; }
+    try { traversalScanResult = callTool('ast_grep_scan', { repoRoot: scanRoot, paths: ['../outside.ts'] }); }
+    catch (error) { traversalScanResult = { status: 'error', fallbackReason: error.message, results: [] }; }
+  } finally {
+    if (originalConfiguredScanUserSettingsPath === undefined) delete process.env.CODE_INTEL_USER_SETTINGS_PATH;
+    else process.env.CODE_INTEL_USER_SETTINGS_PATH = originalConfiguredScanUserSettingsPath;
+    if (originalConfiguredScanProjectSettingsPath === undefined) delete process.env.CODE_INTEL_PROJECT_SETTINGS_PATH;
+    else process.env.CODE_INTEL_PROJECT_SETTINGS_PATH = originalConfiguredScanProjectSettingsPath;
+  }
+  const scanOk = scanResult.status === 'ok' &&
+    scanResult.configPath === path.join(scanRoot, 'sgconfig.yml') &&
+    scanResult.resolvedCommand === fakeScanAstGrep &&
+    scanResult.results.some((row) => row.ruleId === 'local.no-console' && row.file && row.file.endsWith('src/main.ts'));
+  check('ast_grep_scan executes configured rule scan when available', scanOk, JSON.stringify(scanResult).slice(0, 1000));
+  check(
+    'ast_grep_scan rejects unsafe paths before scanning',
+    unsafeScanResult.status === 'unavailable' &&
+      /repo-relative|escapes repo root|outside repo root/.test(unsafeScanResult.fallbackReason || '') &&
+      traversalScanResult.status === 'unavailable' &&
+      /repo-relative|escapes repo root|outside repo root/.test(traversalScanResult.fallbackReason || '') &&
+      Array.isArray(unsafeScanResult.fallback),
+    JSON.stringify({ absolute: unsafeScanResult, traversal: traversalScanResult }).slice(0, 1000)
+  );
+} finally {
+  fs.rmSync(scanRoot, { recursive: true, force: true });
 }
 const extraPathAstRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-extra-path-ast-'));
 try {
