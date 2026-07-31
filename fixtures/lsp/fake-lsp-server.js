@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 let buffer = Buffer.alloc(0);
 let sequence = 0;
@@ -50,6 +52,11 @@ function resultFor(method, params) {
       referencesProvider: true,
       renameProvider: { prepareProvider: true }
     };
+    if (process.env.CODE_INTEL_FAKE_WORKSPACE_CAPABILITIES === '1') {
+      capabilities.workspace = {
+        workspaceFolders: { supported: true, changeNotifications: true }
+      };
+    }
     if (process.env.CODE_INTEL_FAKE_PULL_DIAGNOSTICS !== 'unsupported') {
       capabilities.diagnosticProvider = {
         interFileDependencies: false,
@@ -62,6 +69,15 @@ function resultFor(method, params) {
     };
   }
   if (method === 'textDocument/documentSymbol') {
+    if (process.env.CODE_INTEL_FAKE_CONTENT_AWARE_SYMBOLS === '1') {
+      const text = documents.get(params.textDocument.uri)?.text || '';
+      return [{
+        name: text.includes('changedWorkspaceSymbol') ? 'ChangedWorkspaceSymbol' : 'OriginalWorkspaceSymbol',
+        kind: 13,
+        range: range(0, 0, 0, 1),
+        selectionRange: range(0, 0, 0, 1)
+      }];
+    }
     return [
       {
         name: 'Calculator',
@@ -92,9 +108,24 @@ function resultFor(method, params) {
     ];
   }
   if (method === 'textDocument/definition') {
+    if (process.env.CODE_INTEL_FAKE_CROSS_FILE_TARGET) {
+      return [{
+        uri: pathToFileURL(path.resolve(process.cwd(), process.env.CODE_INTEL_FAKE_CROSS_FILE_TARGET)).href,
+        range: range(0, 16, 0, 19)
+      }];
+    }
     return [{ uri: params.textDocument.uri, range: range(6, 16, 6, 19) }];
   }
   if (method === 'textDocument/references') {
+    if (process.env.CODE_INTEL_FAKE_CROSS_FILE_TARGET) {
+      const targetUri = pathToFileURL(
+        path.resolve(process.cwd(), process.env.CODE_INTEL_FAKE_CROSS_FILE_TARGET)
+      ).href;
+      return [
+        { uri: targetUri, range: range(0, 16, 0, 19) },
+        { uri: params.textDocument.uri, range: range(10, 14, 10, 17) }
+      ];
+    }
     return [
       { uri: params.textDocument.uri, range: range(6, 16, 6, 19) },
       { uri: params.textDocument.uri, range: range(10, 14, 10, 17) }
@@ -160,7 +191,8 @@ function updateDocumentState(message) {
 }
 
 function shouldCrash(message) {
-  if (message.method !== process.env.CODE_INTEL_FAKE_CRASH_ON_METHOD) return false;
+  const crashMethod = process.env.CODE_INTEL_FAKE_CRASH_ON_METHOD;
+  if (!crashMethod || message.method !== crashMethod) return false;
   const crashOnceFile = process.env.CODE_INTEL_FAKE_CRASH_ONCE_FILE;
   if (!crashOnceFile) return true;
   try {
@@ -195,7 +227,10 @@ function handle(message) {
     id: message.id ?? null,
     method: message.method || null,
     version: message.params?.textDocument?.version ?? null,
+    uri: message.params?.textDocument?.uri ?? null,
     rootUri: message.params?.rootUri ?? null,
+    workspaceFolders: message.params?.workspaceFolders ?? null,
+    clientCapabilities: message.params?.capabilities ?? null,
     initializationOptions: message.params?.initializationOptions ?? null
   });
   if (shouldCrash(message)) {
@@ -204,6 +239,29 @@ function handle(message) {
   }
   updateDocumentState(message);
   publishDiagnostics(message);
+  if (
+    message.method === 'initialized' &&
+    process.env.CODE_INTEL_FAKE_REGISTER_WORKSPACE_WATCHERS === '1'
+  ) {
+    frame({
+      jsonrpc: '2.0',
+      id: 9001,
+      method: 'client/registerCapability',
+      params: {
+        registrations: [
+          {
+            id: 'fixture-watched-files',
+            method: 'workspace/didChangeWatchedFiles',
+            registerOptions: { watchers: [{ globPattern: '**/*.ts' }] }
+          },
+          {
+            id: 'fixture-workspace-folders',
+            method: 'workspace/didChangeWorkspaceFolders'
+          }
+        ]
+      }
+    });
+  }
   if (message.id !== undefined) {
     if (message.method === 'textDocument/diagnostic' && process.env.CODE_INTEL_FAKE_PULL_DIAGNOSTICS === 'unsupported') {
       frame({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Method not found' } });

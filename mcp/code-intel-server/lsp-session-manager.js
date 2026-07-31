@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
@@ -17,7 +18,11 @@ import {
   readLspMessagesFromBuffer
 } from './lsp.js';
 import { LspDiagnosticsBroker } from './lsp-diagnostics.js';
-import { resolveRepoRelativeFile } from './repo.js';
+import {
+  canonicalRepoRoot,
+  resolveRepoRelativeFile,
+  workspaceFolderForRepo
+} from './repo.js';
 import { PLUGIN_VERSION, splitCommandLine } from './settings.js';
 
 const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
@@ -41,8 +46,12 @@ function stableValue(value) {
   );
 }
 
+function textHash(text) {
+  return createHash('sha256').update(text).digest('hex');
+}
+
 function sessionDescriptor(commandLine, languageRuntime, args, baseEnv) {
-  const repoRoot = path.resolve(args.repoRoot || process.cwd());
+  const repoRoot = canonicalRepoRoot(args.repoRoot || process.cwd());
   const commandParts = splitCommandLine(commandLine);
   if (!commandParts.length) {
     throw new LspSessionError('LSP command candidate is empty');
@@ -51,6 +60,7 @@ function sessionDescriptor(commandLine, languageRuntime, args, baseEnv) {
   const executable = executableOnPath(commandParts[0], repoRoot, pathSettings).path || commandParts[0];
   const argv = [executable, ...commandParts.slice(1)];
   const initializationOptions = args.initializationOptions || null;
+  const workspaceFolders = [workspaceFolderForRepo(repoRoot)];
   const key = JSON.stringify(stableValue({
     repoRoot,
     argv,
@@ -63,6 +73,7 @@ function sessionDescriptor(commandLine, languageRuntime, args, baseEnv) {
     argv,
     language: languageRuntime.language,
     initializationOptions,
+    workspaceFolders,
     env: envWithExtraPathDirs(baseEnv, args.settingsPathExtraDirs, repoRoot)
   };
 }
@@ -79,6 +90,9 @@ class LspSession {
     this.notifications = [];
     this.diagnostics = new LspDiagnosticsBroker();
     this.openDocuments = new Map();
+    this.documentVersions = new Map();
+    this.watchedFilesRegistered = false;
+    this.workspaceFoldersRegistered = false;
     this.nextRequestId = 1;
     this.initializeResult = null;
     this.startPromise = null;
@@ -113,11 +127,12 @@ class LspSession {
     const initialize = await this.sendRequest('initialize', {
       processId: process.pid,
       rootUri: pathToFileURL(this.descriptor.repoRoot).href,
-      workspaceFolders: [{
-        uri: pathToFileURL(this.descriptor.repoRoot).href,
-        name: path.basename(this.descriptor.repoRoot)
-      }],
+      workspaceFolders: this.descriptor.workspaceFolders,
       capabilities: {
+        workspace: {
+          workspaceFolders: true,
+          didChangeWatchedFiles: { dynamicRegistration: true }
+        },
         textDocument: {
           documentSymbol: {},
           definition: {},
@@ -133,6 +148,9 @@ class LspSession {
       throw new LspSessionError('LSP initialize failed', { lspError: initialize.error });
     }
     this.initializeResult = initialize.result || {};
+    this.workspaceFoldersRegistered = Boolean(
+      this.initializeResult.capabilities?.workspace?.workspaceFolders?.supported
+    );
     this.sendNotification('initialized', {});
     this.touch();
   }
@@ -147,6 +165,8 @@ class LspSession {
         clearTimeout(pending.timer);
         pending.resolve(message);
         this.touch();
+      } else if (message.id !== undefined && message.method) {
+        this.handleServerRequest(message);
       } else if (message.method) {
         if (message.method === 'textDocument/publishDiagnostics') {
           this.diagnostics.publish(message.params);
@@ -160,6 +180,42 @@ class LspSession {
     if (this.protocolErrors.length > errorCount) {
       this.fail(new LspSessionError('LSP server returned invalid JSON-RPC', { retryable: true }));
     }
+  }
+
+  handleServerRequest(message) {
+    if (message.method === 'workspace/workspaceFolders') {
+      this.send({ jsonrpc: '2.0', id: message.id, result: this.descriptor.workspaceFolders });
+      return;
+    }
+    if (message.method === 'client/registerCapability') {
+      for (const registration of message.params?.registrations || []) {
+        if (registration.method === 'workspace/didChangeWatchedFiles') {
+          this.watchedFilesRegistered = true;
+        }
+        if (registration.method === 'workspace/didChangeWorkspaceFolders') {
+          this.workspaceFoldersRegistered = true;
+        }
+      }
+      this.send({ jsonrpc: '2.0', id: message.id, result: null });
+      return;
+    }
+    if (message.method === 'client/unregisterCapability') {
+      for (const unregister of message.params?.unregisterations || message.params?.unregistrations || []) {
+        if (unregister.method === 'workspace/didChangeWatchedFiles') {
+          this.watchedFilesRegistered = false;
+        }
+        if (unregister.method === 'workspace/didChangeWorkspaceFolders') {
+          this.workspaceFoldersRegistered = false;
+        }
+      }
+      this.send({ jsonrpc: '2.0', id: message.id, result: null });
+      return;
+    }
+    this.send({
+      jsonrpc: '2.0',
+      id: message.id,
+      error: { code: -32601, message: `Unsupported client method: ${message.method}` }
+    });
   }
 
   send(message) {
@@ -195,24 +251,51 @@ class LspSession {
   }
 
   ensureDocument(uri, text, language) {
+    const hash = textHash(text);
     const current = this.openDocuments.get(uri);
     if (!current) {
-      const document = { version: 1, text };
+      const version = (this.documentVersions.get(uri) || 0) + 1;
+      const document = { version, hash };
       this.openDocuments.set(uri, document);
+      this.documentVersions.set(uri, version);
       this.sendNotification('textDocument/didOpen', {
         textDocument: { uri, languageId: language, version: document.version, text }
       });
       return document.version;
     }
-    if (current.text !== text) {
+    if (current.hash !== hash) {
       current.version += 1;
-      current.text = text;
+      current.hash = hash;
+      this.documentVersions.set(uri, current.version);
       this.sendNotification('textDocument/didChange', {
         textDocument: { uri, version: current.version },
         contentChanges: [{ text }]
       });
+      if (this.watchedFilesRegistered) {
+        this.sendNotification('workspace/didChangeWatchedFiles', {
+          changes: [{ uri, type: 2 }]
+        });
+      }
     }
     return current.version;
+  }
+
+  closeDocument(uri) {
+    if (!this.openDocuments.has(uri)) return false;
+    this.sendNotification('textDocument/didClose', {
+      textDocument: { uri }
+    });
+    this.openDocuments.delete(uri);
+    this.diagnostics.clear(uri);
+    return true;
+  }
+
+  changeWorkspaceFolders(added = [], removed = []) {
+    if (!this.workspaceFoldersRegistered) return false;
+    this.sendNotification('workspace/didChangeWorkspaceFolders', {
+      event: { added, removed }
+    });
+    return true;
   }
 
   async requestForFile(method, filePath, args) {
@@ -320,11 +403,11 @@ class LspSession {
     clearTimeout(this.idleTimer);
     for (const uri of this.openDocuments.keys()) {
       try {
-        this.send({ jsonrpc: '2.0', method: 'textDocument/didClose', params: { textDocument: { uri } } });
+        this.closeDocument(uri);
       } catch {}
-      this.diagnostics.clear(uri);
     }
     this.openDocuments.clear();
+    this.documentVersions.clear();
     this.diagnostics.clearAll();
     try {
       await this.sendRequest('shutdown', null, timeoutMs);
@@ -440,6 +523,20 @@ export class LspSessionManager {
       args,
       (session, filePath) => session.diagnosticsForFile(filePath, args)
     );
+  }
+
+  closeDocument(commandLine, languageRuntime, args) {
+    const resolved = resolveRepoRelativeFile(args.repoRoot || process.cwd(), args.file);
+    if (!resolved.ok) return false;
+    const descriptor = sessionDescriptor(commandLine, languageRuntime, args, this.env);
+    const session = this.sessions.get(descriptor.key);
+    return session?.closeDocument(pathToFileURL(resolved.filePath).href) || false;
+  }
+
+  changeWorkspaceFolders(commandLine, languageRuntime, args, change) {
+    const descriptor = sessionDescriptor(commandLine, languageRuntime, args, this.env);
+    const session = this.sessions.get(descriptor.key);
+    return session?.changeWorkspaceFolders(change.added, change.removed) || false;
   }
 
   async closeIdleSession(session) {

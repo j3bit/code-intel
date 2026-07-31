@@ -50,7 +50,12 @@
   document version, 수집 시각, stale 여부를 포함한다.
 - push clear notification, 이전 version 거부, notification timeout,
   `post_edit_audit` provenance를 fixture로 검증한다.
-- 현재 사용자 설정을 포함한 기본 validation은 210/210 통과한다.
+- 2026-07-31: P1-1 완료. workspace folder와 watched-file dynamic
+  registration을 처리하고, text hash와 URI별 monotonic version으로
+  open/change/close lifecycle을 관리한다.
+- multi-file definition/reference, 변경 후 최신 symbol, 명시적 close 뒤
+  diagnostics cache 제거, reopen version 증가를 fixture로 검증한다.
+- 현재 사용자 설정을 포함한 기본 validation은 214/214 통과한다.
 
 ### 사용자 언어 도구
 

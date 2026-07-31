@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 
 export function walkFiles(repoRoot, max = 5000) {
   const out = [];
@@ -30,11 +31,15 @@ export function insideDir(root, target) {
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
+export function canonicalRepoRoot(repoRoot) {
+  const resolvedRoot = path.resolve(repoRoot || process.cwd());
+  return realpathIfExists(resolvedRoot) || resolvedRoot;
+}
+
 export function resolveRepoRelativeFile(repoRoot, file) {
   if (!file) return { ok: false, reason: 'file is required for LSP operation' };
   if (path.isAbsolute(file)) return { ok: false, reason: 'file must be repo-relative, not absolute' };
-  const resolvedRoot = path.resolve(repoRoot || process.cwd());
-  const canonicalRoot = realpathIfExists(resolvedRoot) || resolvedRoot;
+  const canonicalRoot = canonicalRepoRoot(repoRoot);
   const candidate = path.resolve(canonicalRoot, file);
   if (!insideDir(canonicalRoot, candidate)) {
     return { ok: false, reason: `file escapes repo root: ${file}` };
@@ -54,6 +59,14 @@ export function resolveRepoRelativePaths(repoRoot, files = []) {
     paths.push(path.relative(resolved.repoRoot, resolved.filePath));
   }
   return { ok: true, paths, reason: null };
+}
+
+export function workspaceFolderForRepo(repoRoot) {
+  const canonicalRoot = canonicalRepoRoot(repoRoot);
+  return {
+    uri: pathToFileURL(canonicalRoot).href,
+    name: path.basename(canonicalRoot)
+  };
 }
 
 export function gitChangedFiles(repoRoot) {

@@ -1149,6 +1149,164 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
     JSON.stringify(changeTraceRows)
   );
 
+  const workspaceRepoRoot = path.join(fakeLspRoot, 'workspace-repo');
+  fs.cpSync(fixtureRepoRoot, workspaceRepoRoot, { recursive: true });
+  const workspaceTargetFile = 'src/operations.ts';
+  fs.writeFileSync(
+    path.join(workspaceRepoRoot, workspaceTargetFile),
+    'export function add(left: number, right: number) { return left + right; }\n'
+  );
+  const workspaceTracePath = path.join(fakeLspRoot, 'workspace-lifecycle-trace.jsonl');
+  const workspaceManager = new LspSessionManager({
+    env: {
+      ...fakeLspEnv,
+      CODE_INTEL_LSP_TRACE_FILE: workspaceTracePath,
+      CODE_INTEL_FAKE_CROSS_FILE_TARGET: workspaceTargetFile,
+      CODE_INTEL_FAKE_CONTENT_AWARE_SYMBOLS: '1',
+      CODE_INTEL_FAKE_WORKSPACE_CAPABILITIES: '1',
+      CODE_INTEL_FAKE_REGISTER_WORKSPACE_WATCHERS: '1',
+      CODE_INTEL_FAKE_PUSH_DIAGNOSTICS: '1',
+      CODE_INTEL_FAKE_PULL_DIAGNOSTICS: 'unsupported'
+    }
+  });
+  const workspaceArgs = {
+    repoRoot: workspaceRepoRoot,
+    file: fixtureFile,
+    settingsPathExtraDirs: [fakeBinDir],
+    timeoutMs: 5000
+  };
+  const workspaceRuntime = { language: 'typescript' };
+  const crossFileDefinition = await workspaceManager.request(
+    'fake-no-version-lsp --stdio',
+    workspaceRuntime,
+    'textDocument/definition',
+    { ...workspaceArgs, position: fixturePosition }
+  );
+  const crossFileReferences = await workspaceManager.request(
+    'fake-no-version-lsp --stdio',
+    workspaceRuntime,
+    'textDocument/references',
+    { ...workspaceArgs, position: fixturePosition }
+  );
+  const symbolsBeforeWorkspaceChange = await workspaceManager.request(
+    'fake-no-version-lsp --stdio',
+    workspaceRuntime,
+    'textDocument/documentSymbol',
+    workspaceArgs
+  );
+  fs.appendFileSync(
+    path.join(workspaceRepoRoot, fixtureFile),
+    '\nexport const changedWorkspaceSymbol = true;\n'
+  );
+  const symbolsAfterWorkspaceChange = await workspaceManager.request(
+    'fake-no-version-lsp --stdio',
+    workspaceRuntime,
+    'textDocument/documentSymbol',
+    workspaceArgs
+  );
+  const diagnosticsBeforeClose = await workspaceManager.diagnosticsForFile(
+    'fake-no-version-lsp --stdio',
+    workspaceRuntime,
+    workspaceArgs
+  );
+  const workspaceSession = [...workspaceManager.sessions.values()][0];
+  const canonicalWorkspaceRepoRoot = fs.realpathSync(workspaceRepoRoot);
+  const workspaceFileUri = pathToFileURL(
+    path.join(canonicalWorkspaceRepoRoot, fixtureFile)
+  ).href;
+  const diagnosticsCachedBeforeClose = Boolean(
+    workspaceSession?.diagnostics.latest(workspaceFileUri)
+  );
+  const documentClosed = workspaceManager.closeDocument(
+    'fake-no-version-lsp --stdio',
+    workspaceRuntime,
+    workspaceArgs
+  );
+  const diagnosticsClearedAfterClose = !workspaceSession?.diagnostics.latest(workspaceFileUri);
+  const workspaceFolderChanged = workspaceManager.changeWorkspaceFolders(
+    'fake-no-version-lsp --stdio',
+    workspaceRuntime,
+    workspaceArgs,
+    {
+      added: [{
+        uri: pathToFileURL(path.join(canonicalWorkspaceRepoRoot, 'packages')).href,
+        name: 'packages'
+      }],
+      removed: []
+    }
+  );
+  const symbolsAfterReopen = await workspaceManager.request(
+    'fake-no-version-lsp --stdio',
+    workspaceRuntime,
+    'textDocument/documentSymbol',
+    workspaceArgs
+  );
+  await workspaceManager.shutdownAll();
+  const workspaceTraceRows = readJsonLines(workspaceTracePath);
+  const workspaceReceiveRows = workspaceTraceRows.filter((row) => row.event === 'receive');
+  const workspaceRootUri = pathToFileURL(canonicalWorkspaceRepoRoot).href;
+  const targetUri = pathToFileURL(
+    path.join(canonicalWorkspaceRepoRoot, workspaceTargetFile)
+  ).href;
+  check(
+    'workspace lifecycle advertises folders and watched-file registration',
+    workspaceReceiveRows.some((row) =>
+      row.method === 'initialize' &&
+      row.rootUri === workspaceRootUri &&
+      row.workspaceFolders?.[0]?.uri === workspaceRootUri &&
+      row.clientCapabilities?.workspace?.workspaceFolders === true &&
+      row.clientCapabilities?.workspace?.didChangeWatchedFiles?.dynamicRegistration === true
+    ) &&
+      workspaceReceiveRows.some((row) =>
+        row.method === 'workspace/didChangeWorkspaceFolders'
+      ) &&
+      workspaceReceiveRows.some((row) =>
+        row.method === 'workspace/didChangeWatchedFiles'
+      ) &&
+      workspaceFolderChanged,
+    JSON.stringify(workspaceReceiveRows)
+  );
+  check(
+    'workspace indexing resolves definition and references without opening every file',
+    crossFileDefinition.response?.result?.[0]?.uri === targetUri &&
+      crossFileReferences.response?.result?.some((reference) => reference.uri === targetUri) &&
+      !workspaceReceiveRows.some((row) =>
+        row.method === 'textDocument/didOpen' && row.uri === targetUri
+      ),
+    JSON.stringify({
+      definition: crossFileDefinition.response?.result,
+      references: crossFileReferences.response?.result
+    })
+  );
+  check(
+    'workspace document changes do not reuse stale symbol results',
+    symbolsBeforeWorkspaceChange.response?.result?.[0]?.name === 'OriginalWorkspaceSymbol' &&
+      symbolsAfterWorkspaceChange.response?.result?.[0]?.name === 'ChangedWorkspaceSymbol' &&
+      workspaceReceiveRows.some((row) =>
+        row.method === 'textDocument/didChange' && row.version === 2
+      ),
+    JSON.stringify({
+      before: symbolsBeforeWorkspaceChange.response?.result,
+      after: symbolsAfterWorkspaceChange.response?.result
+    })
+  );
+  check(
+    'explicit close clears document diagnostics and reopen advances version',
+    diagnosticsBeforeClose.transport === 'push' &&
+      diagnosticsBeforeClose.documentVersion === 2 &&
+      diagnosticsCachedBeforeClose &&
+      documentClosed &&
+      diagnosticsClearedAfterClose &&
+      symbolsAfterReopen.documentVersion === 3 &&
+      workspaceReceiveRows.some((row) =>
+        row.method === 'textDocument/didClose'
+      ) &&
+      workspaceReceiveRows.filter((row) =>
+        row.method === 'textDocument/didOpen'
+      ).some((row) => row.version === 3),
+    JSON.stringify(workspaceReceiveRows)
+  );
+
   const lifecycleTracePath = path.join(fakeLspRoot, 'document-lifecycle-trace.jsonl');
   const initialText = fs.readFileSync(path.join(fixtureRepoRoot, fixtureFile), 'utf8');
   const changedText = initialText.replace('const total', 'const updatedTotal');
