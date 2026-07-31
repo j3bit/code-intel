@@ -50,11 +50,7 @@ function handle(message) {
         id: message.id,
         result: {
           capabilities: {
-            documentSymbolProvider: true,
-            definitionProvider: true,
-            referencesProvider: true,
-            renameProvider: { prepareProvider: true },
-            diagnosticProvider: { interFileDependencies: false, workspaceDiagnostics: false }
+            documentSymbolProvider: true
           },
           serverInfo: { name: 'code-intel-strict-init-lsp', version: '1.0.0' }
         }

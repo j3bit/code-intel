@@ -26,10 +26,19 @@
 - 원격 `main`보다 10 commits ahead, divergence 없음
 - `git push --dry-run --set-upstream` 성공
 - 상위 `j3bit/skills`에는 독립 checkout을 남기고 기존 tracked tree만 제거
-- hermetic validation은 180/180 통과
-- 현재 사용자 설정을 그대로 읽는 validation은 Markdown이 생성한 report까지
+- 계획 작성 당시 hermetic validation은 180/180 통과
+- 계획 작성 당시 사용자 설정을 그대로 읽는 validation은 Markdown이 생성한 report까지
   inventory에 포함해 179/180이다. 테스트가 ambient user settings에
   의존하는 문제로 별도 격리가 필요하다.
+
+## 구현 진행 상황
+
+- 2026-07-31: P0-1 fixture 단계 완료. LSP method oracle,
+  process/lifecycle trace, 동일 MCP 프로세스의 연속 호출, 문서
+  open/change/close, crash, push-only diagnostics gap fixture, init inventory
+  oracle를 추가했다.
+- init/doctor validation을 ambient user settings에서 격리했다.
+- 현재 사용자 설정을 포함한 기본 validation은 194/194 통과한다.
 
 ### 사용자 언어 도구
 

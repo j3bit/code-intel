@@ -17,6 +17,27 @@ function readJson(rel) { return JSON.parse(fs.readFileSync(path.join(ROOT, rel),
 function run(cmd, args, opts = {}) { return spawnSync(cmd, args, { cwd: ROOT, encoding: 'utf8', timeout: 15000, maxBuffer: 10 * 1024 * 1024, ...opts }); }
 function rel(file) { return path.relative(ROOT, file); }
 function writeJson(file, value) { fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n'); }
+function sameJson(actual, expected) { return JSON.stringify(actual) === JSON.stringify(expected); }
+function lspRange(startLine, startCharacter, endLine, endCharacter) {
+  return { start: { line: startLine, character: startCharacter }, end: { line: endLine, character: endCharacter } };
+}
+function readJsonLines(file) {
+  if (!fs.existsSync(file)) return [];
+  return fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+}
+function runToolProbe(name, args, env) {
+  const processResult = run(process.execPath, ['mcp/code-intel-server/index.js', '--call-tool', name, '--args', JSON.stringify(args)], { env });
+  let output = {};
+  try { output = JSON.parse(processResult.stdout || '{}'); } catch {}
+  return { processResult, output };
+}
+function isolatedSettingsEnv(root) {
+  return {
+    ...process.env,
+    CODE_INTEL_USER_SETTINGS_PATH: path.join(root, 'missing-user-settings.json'),
+    CODE_INTEL_PROJECT_SETTINGS_PATH: path.join(root, 'missing-project-settings.json')
+  };
+}
 function validateSkillFrontmatter(relPath) {
   const body = fs.readFileSync(path.join(ROOT, relPath), 'utf8');
   const lines = body.split(/\r?\n/);
@@ -43,6 +64,24 @@ function validateSkillFrontmatter(relPath) {
 function mcpFrame(message) {
   const body = JSON.stringify(message);
   return Buffer.from(`Content-Length: ${Buffer.byteLength(body, 'utf8')}\r\n\r\n${body}`);
+}
+function parseProtocolFrames(output) {
+  const data = Buffer.isBuffer(output) ? output : Buffer.from(String(output || ''), 'utf8');
+  const messages = [];
+  let offset = 0;
+  while (offset < data.length) {
+    const headerEnd = data.indexOf('\r\n\r\n', offset);
+    if (headerEnd < 0) break;
+    const header = data.toString('utf8', offset, headerEnd);
+    const match = header.match(/Content-Length:\s*(\d+)/i);
+    if (!match) break;
+    const bodyStart = headerEnd + 4;
+    const bodyEnd = bodyStart + Number(match[1]);
+    if (bodyEnd > data.length) break;
+    messages.push(JSON.parse(data.toString('utf8', bodyStart, bodyEnd)));
+    offset = bodyEnd;
+  }
+  return messages;
 }
 function initializeFrame() {
   return mcpFrame({
@@ -74,14 +113,13 @@ function resolvedManifestCwd(server, manifestDir = ROOT) {
   if (!server?.cwd) return manifestDir;
   return path.isAbsolute(server.cwd) ? server.cwd : path.resolve(manifestDir, server.cwd);
 }
-function finish() {
+async function finish() {
   const failed = results.filter((r) => !r.ok);
   const report = { status: failed.length ? 'failed' : 'passed', total: results.length, passed: results.length - failed.length, failed: failed.length, results };
-  if (process.argv.includes('--json')) console.log(JSON.stringify(report, null, 2));
-  else {
-    for (const r of results) console.log(`${r.ok ? 'PASS' : 'FAIL'} ${r.name}${r.evidence ? ` — ${r.evidence}` : ''}`);
-    console.log(`\n${report.status}: ${report.passed}/${report.total} checks passed`);
-  }
+  const output = process.argv.includes('--json')
+    ? `${JSON.stringify(report, null, 2)}\n`
+    : `${results.map((r) => `${r.ok ? 'PASS' : 'FAIL'} ${r.name}${r.evidence ? ` — ${r.evidence}` : ''}`).join('\n')}\n\n${report.status}: ${report.passed}/${report.total} checks passed\n`;
+  await new Promise((resolve) => process.stdout.write(output, resolve));
   process.exit(failed.length ? 1 : 0);
 }
 
@@ -108,7 +146,7 @@ try {
   check('default settings validate against settings/schema.json', true, 'settings/defaults.json');
 } catch (error) {
   check('default settings validate against settings/schema.json', false, error.message);
-  finish();
+  await finish();
 }
 check('default settings include python language', Boolean(defaultSettings.languages?.python?.lsp?.commands?.length), JSON.stringify(defaultSettings.languages?.python || {}));
 check('default settings include typescript language', Boolean(defaultSettings.languages?.typescript?.lsp?.commands?.length), JSON.stringify(defaultSettings.languages?.typescript || {}));
@@ -641,12 +679,14 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
 `);
   fs.chmodSync(fakeNoVersionLsp, 0o755);
   const fakeSettingsPath = path.join(fakeLspRoot, 'settings.json');
+  const fakeTracePath = path.join(fakeLspRoot, 'lsp-trace.jsonl');
   const fakeLspEnv = {
     ...process.env,
     PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH || ''}`,
     CODE_INTEL_DEFAULT_SETTINGS_PATH: fakeSettingsPath,
     CODE_INTEL_USER_SETTINGS_PATH: path.join(fakeLspRoot, 'missing-user-settings.json'),
-    CODE_INTEL_PROJECT_SETTINGS_PATH: path.join(fakeLspRoot, 'missing-project-settings.json')
+    CODE_INTEL_PROJECT_SETTINGS_PATH: path.join(fakeLspRoot, 'missing-project-settings.json'),
+    CODE_INTEL_LSP_TRACE_FILE: fakeTracePath
   };
   writeJson(fakeSettingsPath, {
     version: 1,
@@ -680,13 +720,286 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
     lspDiscovery.languages?.typescript?.lsp === 'commandDetected' && lspDiscovery.languages.typescript.lspCommand === 'fake-no-version-lsp --stdio',
     lspDiscoveryProbe.stdout.slice(0, 800) || lspDiscoveryProbe.stderr.slice(0, 800)
   );
-  const lspProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'lsp_symbols', '--args', JSON.stringify({ repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'), file: 'src/math.ts' })], {
-    env: fakeLspEnv
+  const fixtureRepoRoot = path.join(ROOT, 'fixtures/repos/typescript-basic');
+  const fixtureFile = 'src/math.ts';
+  const fixtureUri = pathToFileURL(path.join(fixtureRepoRoot, fixtureFile)).href;
+  const fixturePosition = { line: 10, character: 15 };
+  const lspMethodCases = [
+    {
+      name: 'document symbols',
+      tool: 'lsp_symbols',
+      method: 'textDocument/documentSymbol',
+      verified: 'documentSymbol',
+      args: {},
+      matches: (output) =>
+        output.result?.length === 3 &&
+        output.result[0]?.name === 'Calculator' &&
+        output.result[0]?.children?.[0]?.name === 'add' &&
+        sameJson(output.result[1]?.selectionRange, lspRange(6, 16, 6, 19)) &&
+        output.result[2]?.name === 'total'
+    },
+    {
+      name: 'definition',
+      tool: 'lsp_goto_definition',
+      method: 'textDocument/definition',
+      verified: 'definition',
+      args: { position: fixturePosition },
+      matches: (output) =>
+        output.result?.length === 1 &&
+        output.result[0]?.uri === fixtureUri &&
+        sameJson(output.result[0]?.range, lspRange(6, 16, 6, 19))
+    },
+    {
+      name: 'references',
+      tool: 'lsp_find_references',
+      method: 'textDocument/references',
+      verified: 'references',
+      args: { position: fixturePosition },
+      matches: (output) =>
+        output.result?.length === 2 &&
+        output.result.every((reference) => reference.uri === fixtureUri) &&
+        sameJson(output.result[0]?.range, lspRange(6, 16, 6, 19)) &&
+        sameJson(output.result[1]?.range, lspRange(10, 14, 10, 17))
+    },
+    {
+      name: 'prepare rename',
+      tool: 'lsp_prepare_rename',
+      method: 'textDocument/prepareRename',
+      verified: 'prepareRename',
+      args: { position: fixturePosition },
+      matches: (output) =>
+        output.result?.placeholder === 'add' &&
+        sameJson(output.result?.range, lspRange(10, 14, 10, 17))
+    },
+    {
+      name: 'rename preview',
+      tool: 'lsp_rename_preview',
+      method: 'textDocument/rename',
+      verified: 'rename',
+      args: { position: fixturePosition, newName: 'sum' },
+      matches: (output) => {
+        const edits = output.result?.changes?.[fixtureUri];
+        return output.previewOnly === true &&
+          output.mutated === false &&
+          edits?.length === 2 &&
+          edits.every((edit) => edit.newText === 'sum') &&
+          sameJson(edits[0]?.range, lspRange(6, 16, 6, 19)) &&
+          sameJson(edits[1]?.range, lspRange(10, 14, 10, 17));
+      }
+    },
+    {
+      name: 'pull diagnostics',
+      tool: 'lsp_diagnostics',
+      method: 'textDocument/diagnostic',
+      verified: 'diagnostic',
+      args: {},
+      matches: (output) =>
+        output.result?.kind === 'full' &&
+        output.result?.items?.length === 1 &&
+        output.result.items[0]?.code === 'fixture-warning' &&
+        output.result.items[0]?.message === 'fixture diagnostic' &&
+        sameJson(output.result.items[0]?.range, lspRange(11, 0, 11, 19))
+    }
+  ];
+  for (const fixtureCase of lspMethodCases) {
+    const { processResult, output } = runToolProbe(fixtureCase.tool, {
+      repoRoot: fixtureRepoRoot,
+      file: fixtureFile,
+      timeoutMs: 5000,
+      ...fixtureCase.args
+    }, fakeLspEnv);
+    check(
+      `LSP fixture oracle: ${fixtureCase.name}`,
+      processResult.status === 0 &&
+        output.status === 'ok' &&
+        output.method === fixtureCase.method &&
+        output.lspState === 'methodVerified' &&
+        output.methodVerified === fixtureCase.verified &&
+        fixtureCase.matches(output),
+      processResult.stdout.slice(0, 1000) || processResult.stderr.slice(0, 1000)
+    );
+  }
+
+  const traceRows = readJsonLines(fakeTracePath);
+  const sessions = new Map();
+  for (const row of traceRows) {
+    if (!sessions.has(row.pid)) sessions.set(row.pid, []);
+    sessions.get(row.pid).push(row);
+  }
+  const completeLifecycles = lspMethodCases.every((fixtureCase) => {
+    const rows = [...sessions.values()].find((sessionRows) =>
+      sessionRows.some((row) => row.event === 'receive' && row.method === fixtureCase.method)
+    ) || [];
+    const methods = rows.filter((row) => row.event === 'receive').map((row) => row.method);
+    const initializeAt = methods.indexOf('initialize');
+    const initializedAt = methods.indexOf('initialized');
+    const didOpenAt = methods.indexOf('textDocument/didOpen');
+    const targetAt = methods.indexOf(fixtureCase.method);
+    const shutdownAt = methods.indexOf('shutdown');
+    const exitAt = methods.indexOf('exit');
+    return initializeAt >= 0 &&
+      initializedAt > initializeAt &&
+      didOpenAt > initializedAt &&
+      targetAt > didOpenAt &&
+      shutdownAt > targetAt &&
+      exitAt > shutdownAt;
   });
-  const lspOutput = JSON.parse(lspProbe.stdout || '{}');
-  check('LSP tools execute real JSON-RPC operation when server is available', lspProbe.status === 0 && lspOutput.status === 'ok' && lspOutput.method === 'textDocument/documentSymbol' && lspOutput.lspState === 'methodVerified' && Array.isArray(lspOutput.result), lspProbe.stdout.slice(0, 500) || lspProbe.stderr.slice(0, 500));
+  check(
+    'LSP trace captures process-per-request baseline for persistent-session gate',
+    sessions.size === lspMethodCases.length && completeLifecycles,
+    `processes=${sessions.size}; requests=${lspMethodCases.length}; persistent-target=1`
+  );
+
+  const multiCallTracePath = path.join(fakeLspRoot, 'same-mcp-process-trace.jsonl');
+  const multiCallProbe = run(process.execPath, ['mcp/code-intel-server/index.js'], {
+    env: {
+      ...fakeLspEnv,
+      CODE_INTEL_LSP_TRACE_FILE: multiCallTracePath
+    },
+    input: Buffer.concat([
+      initializeFrame(),
+      mcpFrame({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} }),
+      mcpFrame({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: {
+          name: 'lsp_symbols',
+          arguments: { repoRoot: fixtureRepoRoot, file: fixtureFile, timeoutMs: 5000 }
+        }
+      }),
+      mcpFrame({
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'tools/call',
+        params: {
+          name: 'lsp_goto_definition',
+          arguments: { repoRoot: fixtureRepoRoot, file: fixtureFile, position: fixturePosition, timeoutMs: 5000 }
+        }
+      })
+    ])
+  });
+  const multiCallResponses = parseProtocolFrames(multiCallProbe.stdout);
+  const multiCallTraceRows = readJsonLines(multiCallTracePath);
+  const multiCallProcesses = new Set(
+    multiCallTraceRows
+      .filter((row) => row.event === 'process-start')
+      .map((row) => row.pid)
+  );
+  check(
+    'same MCP process fixture captures per-tool LSP process gap',
+    multiCallProbe.status === 0 &&
+      multiCallResponses.some((message) => message.id === 2 && message.result?.structuredContent?.status === 'ok') &&
+      multiCallResponses.some((message) => message.id === 3 && message.result?.structuredContent?.status === 'ok') &&
+      multiCallProcesses.size === 2,
+    `lspProcesses=${multiCallProcesses.size}; persistent-target=1`
+  );
+
+  const lifecycleTracePath = path.join(fakeLspRoot, 'document-lifecycle-trace.jsonl');
+  const initialText = fs.readFileSync(path.join(fixtureRepoRoot, fixtureFile), 'utf8');
+  const changedText = initialText.replace('const total', 'const updatedTotal');
+  const lifecycleProbe = run(process.execPath, [path.join(ROOT, 'fixtures/lsp/fake-lsp-server.js')], {
+    env: {
+      ...fakeLspEnv,
+      CODE_INTEL_LSP_TRACE_FILE: lifecycleTracePath
+    },
+    input: Buffer.concat([
+      mcpFrame({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }),
+      mcpFrame({ jsonrpc: '2.0', method: 'initialized', params: {} }),
+      mcpFrame({
+        jsonrpc: '2.0',
+        method: 'textDocument/didOpen',
+        params: {
+          textDocument: {
+            uri: fixtureUri,
+            languageId: 'typescript',
+            version: 1,
+            text: initialText
+          }
+        }
+      }),
+      mcpFrame({
+        jsonrpc: '2.0',
+        method: 'textDocument/didChange',
+        params: {
+          textDocument: { uri: fixtureUri, version: 2 },
+          contentChanges: [{ text: changedText }]
+        }
+      }),
+      mcpFrame({
+        jsonrpc: '2.0',
+        method: 'textDocument/didClose',
+        params: { textDocument: { uri: fixtureUri } }
+      }),
+      mcpFrame({ jsonrpc: '2.0', id: 2, method: 'shutdown', params: null }),
+      mcpFrame({ jsonrpc: '2.0', method: 'exit', params: null })
+    ])
+  });
+  const lifecycleTraceRows = readJsonLines(lifecycleTracePath);
+  const lifecycleEvents = lifecycleTraceRows.filter((row) =>
+    ['document-open', 'document-change', 'document-close'].includes(row.event)
+  );
+  check(
+    'document lifecycle fixture tracks open change and close state',
+    lifecycleProbe.status === 0 &&
+      lifecycleEvents.length === 3 &&
+      lifecycleEvents[0]?.event === 'document-open' &&
+      lifecycleEvents[0]?.version === 1 &&
+      lifecycleEvents[0]?.openDocuments === 1 &&
+      lifecycleEvents[1]?.event === 'document-change' &&
+      lifecycleEvents[1]?.version === 2 &&
+      lifecycleEvents[1]?.openDocuments === 1 &&
+      lifecycleEvents[2]?.event === 'document-close' &&
+      lifecycleEvents[2]?.openDocuments === 0,
+    lifecycleTraceRows.map((row) => `${row.sequence}:${row.event}:${row.version ?? ''}:${row.openDocuments ?? ''}`).join(', ')
+  );
+
+  const crashTracePath = path.join(fakeLspRoot, 'crash-trace.jsonl');
+  const crashProbe = runToolProbe('lsp_symbols', {
+    repoRoot: fixtureRepoRoot,
+    file: fixtureFile,
+    timeoutMs: 5000
+  }, {
+    ...fakeLspEnv,
+    CODE_INTEL_LSP_TRACE_FILE: crashTracePath,
+    CODE_INTEL_FAKE_CRASH_ON_METHOD: 'textDocument/documentSymbol'
+  });
+  const crashTraceRows = readJsonLines(crashTracePath);
+  check(
+    'LSP crash fixture records deterministic unavailable result',
+    crashProbe.processResult.status === 0 &&
+      crashProbe.output.status === 'unavailable' &&
+      crashProbe.output.method === 'textDocument/documentSymbol' &&
+      crashTraceRows.some((row) =>
+        row.event === 'process-crash' &&
+        row.method === 'textDocument/documentSymbol' &&
+        row.exitCode === 86
+      ),
+    crashProbe.processResult.stdout.slice(0, 1000) || crashProbe.processResult.stderr.slice(0, 1000)
+  );
+
+  const pushTracePath = path.join(fakeLspRoot, 'push-diagnostics-trace.jsonl');
+  const pushOnlyProbe = runToolProbe('lsp_diagnostics', {
+    repoRoot: fixtureRepoRoot,
+    file: fixtureFile,
+    timeoutMs: 5000
+  }, {
+    ...fakeLspEnv,
+    CODE_INTEL_LSP_TRACE_FILE: pushTracePath,
+    CODE_INTEL_FAKE_PUSH_DIAGNOSTICS: '1',
+    CODE_INTEL_FAKE_PULL_DIAGNOSTICS: 'unsupported'
+  });
+  const pushTraceRows = readJsonLines(pushTracePath);
+  check(
+    'push-only diagnostics fixture reproduces publish/pull integration gap',
+    pushOnlyProbe.output.status === 'error' &&
+      pushOnlyProbe.output.error?.code === -32601 &&
+      pushTraceRows.some((row) => row.event === 'send' && row.method === 'textDocument/publishDiagnostics') &&
+      pushTraceRows.some((row) => row.event === 'receive' && row.method === 'textDocument/diagnostic'),
+    pushOnlyProbe.processResult.stdout.slice(0, 1000) || pushOnlyProbe.processResult.stderr.slice(0, 1000)
+  );
 } catch (error) {
-  check('LSP tools execute real JSON-RPC operation when server is available', false, error.message);
+  check('LSP fixture oracle suite executes', false, error.stack || error.message);
 } finally {
   fs.rmSync(fakeLspRoot, { recursive: true, force: true });
 }
@@ -902,7 +1215,12 @@ try {
   const strictOutput = JSON.parse(strictProbe.stdout || '{}');
   check(
     'LSP client waits for initialize before sending follow-up messages',
-    strictProbe.status === 0 && strictOutput.status === 'ok' && strictOutput.serverInfo?.name === 'code-intel-strict-init-lsp' && Array.isArray(strictOutput.result),
+    strictProbe.status === 0 &&
+      strictOutput.status === 'ok' &&
+      strictOutput.serverInfo?.name === 'code-intel-strict-init-lsp' &&
+      strictOutput.result?.length === 1 &&
+      strictOutput.result[0]?.name === 'add' &&
+      sameJson(strictOutput.result[0]?.selectionRange, lspRange(0, 0, 0, 3)),
     strictProbe.stdout.slice(0, 800) || strictProbe.stderr.slice(0, 800)
   );
 } catch (error) {
@@ -1298,17 +1616,35 @@ try {
 }
 
 // Init workflow validation
+const INIT_FIXTURE_ORACLES = {
+  'typescript-basic': { language: 'typescript', files: 1, astGrepSmoke: 'passed' },
+  'python-basic': { language: 'python', files: 1, astGrepSmoke: 'passed' },
+  'mixed-no-lsp': { language: 'javascript', files: 1, astGrepSmoke: 'passed' },
+  'unsupported-language': { unsupportedExtension: '.foo', unsupportedFiles: 1 }
+};
 const initTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-fixtures-'));
 try {
-  for (const fixture of ['typescript-basic','python-basic','mixed-no-lsp','unsupported-language']) {
+  const initEnv = isolatedSettingsEnv(initTmpRoot);
+  for (const fixture of Object.keys(INIT_FIXTURE_ORACLES)) {
     const sourceFixtureRoot = path.join(ROOT, 'fixtures/repos', fixture);
     const fixtureRoot = path.join(initTmpRoot, fixture);
     fs.cpSync(sourceFixtureRoot, fixtureRoot, { recursive: true, filter: (src) => !src.includes(`${path.sep}docs${path.sep}code-intel`) });
-    const first = run('node', ['scripts/init-code-intel.js', '--repo', fixtureRoot, '--json']);
-    const second = run('node', ['scripts/init-code-intel.js', '--repo', fixtureRoot, '--json']);
+    const first = run('node', ['scripts/init-code-intel.js', '--repo', fixtureRoot, '--json'], { env: initEnv });
+    const second = run('node', ['scripts/init-code-intel.js', '--repo', fixtureRoot, '--json'], { env: initEnv });
     check(`init ${fixture} succeeds twice`, first.status === 0 && second.status === 0, (first.stderr || second.stderr || '').slice(0, 300));
     for (const report of ['capability-report.md','routing-profile.json','validation-report.md']) check(`init ${fixture} writes ${report}`, fs.existsSync(path.join(fixtureRoot, 'docs/code-intel', report)), report);
     const profile = JSON.parse(fs.readFileSync(path.join(fixtureRoot, 'docs/code-intel/routing-profile.json'), 'utf8'));
+    const oracle = INIT_FIXTURE_ORACLES[fixture];
+    const fixtureMatchesOracle = oracle.language
+      ? profile.inventory?.languages?.[oracle.language]?.files === oracle.files &&
+        profile.languages?.[oracle.language]?.files === oracle.files &&
+        profile.languages?.[oracle.language]?.astGrepSmoke?.status === oracle.astGrepSmoke
+      : profile.inventory?.unsupportedExtensions?.[oracle.unsupportedExtension] === oracle.unsupportedFiles;
+    check(`init ${fixture} matches fixture inventory oracle`, fixtureMatchesOracle, JSON.stringify({
+      oracle,
+      inventory: profile.inventory,
+      language: oracle.language ? profile.languages?.[oracle.language] : null
+    }).slice(0, 1000));
     check(`init ${fixture} records settings version`, Boolean(profile.settingsVersion), String(profile.settingsVersion));
     check(`init ${fixture} records settings sources`, Boolean(profile.settingsSources), JSON.stringify(profile.settingsSources));
     const retiredProfileVersionField = ['ad', 'apter', 'Reg', 'istryVersion'].join('');
@@ -1367,8 +1703,9 @@ printf '%s\n' '[{"file":"example.py","text":"fake init smoke","language":"Python
 const freshDoctorTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-fresh-doctor-'));
 try {
   fs.cpSync(path.join(ROOT, 'fixtures/repos/typescript-basic'), freshDoctorTmpRoot, { recursive: true });
-  const initRun = run('node', ['scripts/init-code-intel.js', '--repo', freshDoctorTmpRoot, '--json']);
-  const doctorRun = run('node', ['scripts/doctor-code-intel.js', '--repo', freshDoctorTmpRoot, '--json']);
+  const freshDoctorEnv = isolatedSettingsEnv(freshDoctorTmpRoot);
+  const initRun = run('node', ['scripts/init-code-intel.js', '--repo', freshDoctorTmpRoot, '--json'], { env: freshDoctorEnv });
+  const doctorRun = run('node', ['scripts/doctor-code-intel.js', '--repo', freshDoctorTmpRoot, '--json'], { env: freshDoctorEnv });
   const doctor = JSON.parse(doctorRun.stdout || '{}');
   const reasons = (doctor.findings || []).map((finding) => finding.reason);
   check('fresh init then doctor does not report generated report inventory mismatch', initRun.status === 0 && doctorRun.status === 0 && !reasons.includes('language inventory major mismatch'), reasons.join(' | '));
@@ -1377,14 +1714,14 @@ try {
   const profile = JSON.parse(fs.readFileSync(profilePath, 'utf8'));
   profile.settingsSources = { project: profile.settingsSources.project, user: profile.settingsSources.user, default: profile.settingsSources.default };
   writeJson(profilePath, profile);
-  const reorderedRun = run('node', ['scripts/doctor-code-intel.js', '--repo', freshDoctorTmpRoot, '--json']);
+  const reorderedRun = run('node', ['scripts/doctor-code-intel.js', '--repo', freshDoctorTmpRoot, '--json'], { env: freshDoctorEnv });
   const reorderedDoctor = JSON.parse(reorderedRun.stdout || '{}');
   const reorderedReasons = (reorderedDoctor.findings || []).map((finding) => finding.reason);
   check('doctor treats reordered settings sources as equivalent', reorderedRun.status === 0 && !reorderedReasons.includes('settings source differs'), reorderedReasons.join(' | '));
 
   profile.settingsSources = { ...profile.settingsSources, default: 'stale-settings-source' };
   writeJson(profilePath, profile);
-  const changedRun = run('node', ['scripts/doctor-code-intel.js', '--repo', freshDoctorTmpRoot, '--json']);
+  const changedRun = run('node', ['scripts/doctor-code-intel.js', '--repo', freshDoctorTmpRoot, '--json'], { env: freshDoctorEnv });
   const changedDoctor = JSON.parse(changedRun.stdout || '{}');
   const changedReasons = (changedDoctor.findings || []).map((finding) => finding.reason);
   check('doctor detects changed settings source', changedRun.status === 0 && changedReasons.includes('settings source differs'), changedReasons.join(' | '));
@@ -1394,6 +1731,7 @@ try {
 const staleTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-stale-profile-'));
 try {
   fs.cpSync(path.join(ROOT, 'fixtures/repos/typescript-basic'), staleTmpRoot, { recursive: true });
+  const staleDoctorEnv = isolatedSettingsEnv(staleTmpRoot);
   const staleDocs = path.join(staleTmpRoot, 'docs/code-intel');
   fs.mkdirSync(staleDocs, { recursive: true });
   writeJson(path.join(staleDocs, 'routing-profile.json'), {
@@ -1406,12 +1744,12 @@ try {
     languages: {},
     inventory: { totalFiles: 0, languages: {} }
   });
-  const doctorRun = run('node', ['scripts/doctor-code-intel.js', '--repo', staleTmpRoot, '--json']);
+  const doctorRun = run('node', ['scripts/doctor-code-intel.js', '--repo', staleTmpRoot, '--json'], { env: staleDoctorEnv });
   const doctor = JSON.parse(doctorRun.stdout || '{}');
   const reasons = (doctor.findings || []).map((finding) => finding.reason).join(' | ');
   check('doctor detects stale routing profile version and inventory mismatch', reasons.includes('plugin version differs') && reasons.includes('settings version differs') && reasons.includes('settings source differs') && reasons.includes('language inventory major mismatch'), reasons);
   fs.writeFileSync(path.join(staleDocs, 'routing-profile.json'), '{bad json');
-  const corruptDoctorRun = run('node', ['scripts/doctor-code-intel.js', '--repo', staleTmpRoot, '--json']);
+  const corruptDoctorRun = run('node', ['scripts/doctor-code-intel.js', '--repo', staleTmpRoot, '--json'], { env: staleDoctorEnv });
   const corruptDoctor = JSON.parse(corruptDoctorRun.stdout || '{}');
   const corruptReasons = (corruptDoctor.findings || []).map((finding) => finding.reason).join(' | ');
   check('doctor survives malformed routing profile and reports live fallback', corruptDoctorRun.status === 0 && corruptReasons.includes('routing profile unreadable'), corruptReasons || corruptDoctorRun.stderr);
@@ -1567,4 +1905,4 @@ for (const file of activeSurfaceFiles) {
 }
 check('active surfaces omit retired settings-era terms', retiredHits.length === 0, retiredHits.join(', ') || 'none');
 
-finish();
+await finish();
