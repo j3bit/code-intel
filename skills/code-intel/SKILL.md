@@ -16,8 +16,10 @@ Use this skill for codebase questions involving declarations, patterns, API usag
 5. Prefer `ast_grep_search` for structural patterns when the effective code-intel settings define an ast-grep language id.
 6. Prefer `ast_grep_scan` for configured rule-based AST audits when `astGrep.configPath` is set.
 7. Use `post_edit_audit` after code edits when diagnostics or audit evidence is needed before final response.
-8. Use `rg`/`grep` fallback for strings, filenames, logs, generated files, unsupported languages, missing tools, or inconclusive code-intel output.
-9. Report the route and fallback reason.
+8. Use `lsp_hover`, `lsp_completion`, and `lsp_semantic_tokens` only when their responses verify the method.
+9. Use `lsp_formatting_preview` for formatting proposals; it must not mutate files.
+10. Use `rg`/`grep` fallback for strings, filenames, logs, generated files, unsupported languages, missing tools, or inconclusive code-intel output.
+11. Report the route and fallback reason.
 
 ## Command Policy
 

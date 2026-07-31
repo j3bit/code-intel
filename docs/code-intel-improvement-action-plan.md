@@ -67,7 +67,12 @@
 - 언어별 대표 파일을 실제 ast-grep language ID로 parse-smoke해 custom
   grammar load 실패를 unavailable로 낮추고 doctor에 원인과 fallback을
   표시한다.
-- 현재 사용자 설정을 포함한 기본 validation은 226/226 통과한다.
+- 2026-07-31: P2-1 완료. hover, completion, full semantic tokens,
+  formatting preview 도구를 persistent session 경로에 추가했다.
+- 새 도구는 initialize capability를 먼저 확인하며, completion과 semantic
+  token 결과에는 1000 이하 상한 및 truncation metadata를 제공한다.
+  formatting은 TextEdit preview만 반환하고 파일을 변경하지 않는다.
+- 현재 사용자 설정을 포함한 기본 validation은 236/236 통과한다.
 
 ### 사용자 언어 도구
 

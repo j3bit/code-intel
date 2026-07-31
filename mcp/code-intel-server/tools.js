@@ -16,7 +16,11 @@ export const TOOL_NAMES = [
   'lsp_goto_definition',
   'lsp_find_references',
   'lsp_prepare_rename',
-  'lsp_rename_preview'
+  'lsp_rename_preview',
+  'lsp_hover',
+  'lsp_completion',
+  'lsp_semantic_tokens',
+  'lsp_formatting_preview'
 ];
 
 function callLspTool(runtime, method, args) {
@@ -30,6 +34,64 @@ function renamePreview(result) {
     return result.then((value) => ({ ...value, previewOnly: true, mutated: false }));
   }
   return { ...result, previewOnly: true, mutated: false };
+}
+
+function mapResult(result, mapper) {
+  return result && typeof result.then === 'function'
+    ? result.then(mapper)
+    : mapper(result);
+}
+
+function boundedLimit(value, fallback = 200) {
+  const parsed = Number(value ?? fallback);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(1, Math.min(Math.floor(parsed), 1000));
+}
+
+function limitCompletion(result, maxResults) {
+  if (result?.status !== 'ok') return result;
+  const limit = boundedLimit(maxResults);
+  const completionList = !Array.isArray(result.result) && result.result?.items;
+  const items = Array.isArray(result.result)
+    ? result.result
+    : completionList
+      ? result.result.items
+      : [];
+  const limited = items.slice(0, limit);
+  return {
+    ...result,
+    result: Array.isArray(result.result)
+      ? limited
+      : { ...result.result, items: limited },
+    totalItems: items.length,
+    returnedItems: limited.length,
+    maxResults: limit,
+    truncated: items.length > limited.length
+  };
+}
+
+function limitSemanticTokens(result, maxResults) {
+  if (result?.status !== 'ok') return result;
+  const limit = boundedLimit(maxResults);
+  const data = Array.isArray(result.result?.data) ? result.result.data : [];
+  const totalItems = Math.floor(data.length / 5);
+  const returnedItems = Math.min(totalItems, limit);
+  return {
+    ...result,
+    result: { ...result.result, data: data.slice(0, returnedItems * 5) },
+    totalItems,
+    returnedItems,
+    maxResults: limit,
+    truncated: totalItems > returnedItems
+  };
+}
+
+function formattingPreview(result) {
+  return {
+    ...result,
+    previewOnly: true,
+    mutated: false
+  };
 }
 
 export function callTool(name, args = {}, runtime = {}) {
@@ -46,6 +108,19 @@ export function callTool(name, args = {}, runtime = {}) {
     case 'lsp_find_references': return callLspTool(runtime, 'textDocument/references', args);
     case 'lsp_prepare_rename': return callLspTool(runtime, 'textDocument/prepareRename', args);
     case 'lsp_rename_preview': return renamePreview(callLspTool(runtime, 'textDocument/rename', args));
+    case 'lsp_hover': return callLspTool(runtime, 'textDocument/hover', { ...args, requireAdvertisedCapability: true });
+    case 'lsp_completion': return mapResult(
+      callLspTool(runtime, 'textDocument/completion', { ...args, requireAdvertisedCapability: true }),
+      (result) => limitCompletion(result, args.maxResults)
+    );
+    case 'lsp_semantic_tokens': return mapResult(
+      callLspTool(runtime, 'textDocument/semanticTokens/full', { ...args, requireAdvertisedCapability: true }),
+      (result) => limitSemanticTokens(result, args.maxResults)
+    );
+    case 'lsp_formatting_preview': return mapResult(
+      callLspTool(runtime, 'textDocument/formatting', { ...args, requireAdvertisedCapability: true }),
+      formattingPreview
+    );
     default: throw new Error(`unknown tool: ${name}`);
   }
 }
@@ -101,6 +176,21 @@ export const tools = TOOL_NAMES.map((name) => {
       base.inputSchema.required.push('position');
     }
     if (name === 'lsp_rename_preview') base.inputSchema.required.push('newName');
+    if (['lsp_completion', 'lsp_semantic_tokens'].includes(name)) {
+      base.inputSchema.properties.maxResults = {
+        type: 'number',
+        description: 'Maximum completion items or semantic tokens returned; capped at 1000.'
+      };
+    }
+    if (name === 'lsp_completion') {
+      base.inputSchema.properties.context = { type: 'object' };
+      base.inputSchema.required.push('position');
+    }
+    if (name === 'lsp_hover') base.inputSchema.required.push('position');
+    if (name === 'lsp_formatting_preview') {
+      base.inputSchema.properties.options = { type: 'object' };
+      base.description = 'Preview LSP document formatting TextEdits without mutating the file.';
+    }
   }
   return base;
 });

@@ -12,6 +12,7 @@ import {
   languageConfigForFile,
   languageConfigForLanguage,
   lspCapabilityForMethod,
+  lspMethodAdvertised,
   runtimeFallbackUsed
 } from './capabilities.js';
 
@@ -155,6 +156,21 @@ export function lspParams(method, uri, args = {}) {
       return { textDocument, position };
     case 'textDocument/rename':
       return { textDocument, position, newName: args.newName || args.symbol || 'renamedSymbol' };
+    case 'textDocument/hover':
+      return { textDocument, position };
+    case 'textDocument/completion':
+      return {
+        textDocument,
+        position,
+        context: args.context || { triggerKind: 1 }
+      };
+    case 'textDocument/semanticTokens/full':
+      return { textDocument };
+    case 'textDocument/formatting':
+      return {
+        textDocument,
+        options: args.options || { tabSize: 2, insertSpaces: true }
+      };
     default:
       return { textDocument, position };
   }
@@ -193,11 +209,20 @@ export async function runLspRequestAsync(commandCandidate, languageRuntime, meth
         workspaceFolders: [{ uri: pathToFileURL(repoRoot).href, name: path.basename(repoRoot) }],
         capabilities: {
           textDocument: {
+            hover: {},
+            completion: {},
             documentSymbol: {},
             definition: {},
             references: {},
             rename: { prepareSupport: true },
-            diagnostic: {}
+            diagnostic: {},
+            semanticTokens: {
+              requests: { full: true },
+              tokenTypes: [],
+              tokenModifiers: [],
+              formats: ['relative']
+            },
+            formatting: {}
           }
         },
         initializationOptions: args.initializationOptions ?? null,
@@ -206,6 +231,29 @@ export async function runLspRequestAsync(commandCandidate, languageRuntime, meth
     });
     const initialize = await waitForLspMessage(state, (message) => message.id === 1, timeoutMs);
     if (initialize?.error) throw Object.assign(new Error('LSP initialize failed'), { lspError: initialize.error });
+
+    if (
+      args.requireAdvertisedCapability &&
+      lspMethodAdvertised(initialize?.result?.capabilities || {}, method) === false
+    ) {
+      child.kill();
+      return lspUnavailable(
+        method,
+        { ...args, language: languageRuntime.language },
+        `LSP server did not advertise ${lspCapabilityForMethod(method)}`,
+        {
+          command: commandLine,
+          serverInfo: initialize?.result?.serverInfo || null,
+          serverCapabilities: initialize?.result?.capabilities || {},
+          expectedCapabilities: expectedLspCapabilities(languageRuntime),
+          advertisedCapabilities: advertisedLspCapabilities(
+            initialize?.result?.capabilities || {}
+          ),
+          verifiedCapabilities: [],
+          unsupportedCapabilities: [lspCapabilityForMethod(method)]
+        }
+      );
+    }
 
     write({ jsonrpc: '2.0', method: 'initialized', params: {} });
     if (args.serverSettings !== null && args.serverSettings !== undefined) {

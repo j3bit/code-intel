@@ -12,6 +12,7 @@ import {
   findLspCommand,
   languageConfigForFile,
   lspCapabilityForMethod,
+  lspMethodAdvertised,
   runtimeFallbackUsed
 } from './capabilities.js';
 import {
@@ -146,11 +147,20 @@ class LspSession {
           didChangeWatchedFiles: { dynamicRegistration: true }
         },
         textDocument: {
+          hover: {},
+          completion: {},
           documentSymbol: {},
           definition: {},
           references: {},
           rename: { prepareSupport: true },
-          diagnostic: {}
+          diagnostic: {},
+          semanticTokens: {
+            requests: { full: true },
+            tokenTypes: [],
+            tokenModifiers: [],
+            formats: ['relative']
+          },
+          formatting: {}
         }
       },
       initializationOptions: this.descriptor.initializationOptions,
@@ -316,6 +326,16 @@ class LspSession {
   }
 
   async requestForFile(method, filePath, args) {
+    if (
+      args.requireAdvertisedCapability &&
+      lspMethodAdvertised(this.initializeResult?.capabilities || {}, method) === false
+    ) {
+      return {
+        response: null,
+        documentVersion: null,
+        methodNotAdvertised: true
+      };
+    }
     const uri = pathToFileURL(filePath).href;
     const text = fs.readFileSync(filePath, 'utf8');
     const documentVersion = this.ensureDocument(uri, text, this.descriptor.languageId);
@@ -613,6 +633,17 @@ export async function lspToolWithSession(manager, method, args = {}) {
       const advertisedCapabilities = advertisedLspCapabilities(
         result.initializeResult?.capabilities || {}
       );
+      if (result.methodNotAdvertised) {
+        candidateFailures.push({
+          command,
+          reason: `LSP server did not advertise ${capability}`
+        });
+        lastAttemptResult = {
+          ...result,
+          advertisedCapabilities
+        };
+        continue;
+      }
       if (result.diagnosticsTimedOut) {
         candidateFailures.push({
           command,
@@ -712,6 +743,11 @@ export async function lspToolWithSession(manager, method, args = {}) {
       candidates,
       candidateFailures,
       expectedCapabilities,
+      advertisedCapabilities: lastAttemptResult?.advertisedCapabilities || [],
+      verifiedCapabilities: [],
+      unsupportedCapabilities: lastAttemptResult?.methodNotAdvertised
+        ? [capability]
+        : [],
       transport: lastAttemptResult?.transport,
       documentVersion: lastAttemptResult?.documentVersion,
       collectedAt: lastAttemptResult?.collectedAt,

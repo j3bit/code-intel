@@ -143,6 +143,10 @@ export function advertisedLspCapabilities(capabilities = {}) {
   if (capabilities.renameProvider?.prepareProvider) advertised.push('prepareRename');
   if (capabilities.diagnosticProvider) advertised.push('diagnostics');
   if (capabilities.documentSymbolProvider) advertised.push('symbols');
+  if (capabilities.hoverProvider) advertised.push('hover');
+  if (capabilities.completionProvider) advertised.push('completion');
+  if (capabilities.semanticTokensProvider?.full) advertised.push('semanticTokens');
+  if (capabilities.documentFormattingProvider) advertised.push('formatting');
   return advertised;
 }
 
@@ -153,8 +157,27 @@ export function lspCapabilityForMethod(method) {
     'textDocument/prepareRename': 'prepareRename',
     'textDocument/rename': 'rename',
     'textDocument/diagnostic': 'diagnostics',
-    'textDocument/documentSymbol': 'symbols'
+    'textDocument/documentSymbol': 'symbols',
+    'textDocument/hover': 'hover',
+    'textDocument/completion': 'completion',
+    'textDocument/semanticTokens/full': 'semanticTokens',
+    'textDocument/formatting': 'formatting'
   }[method] || method.split('/').pop();
+}
+
+export function lspMethodAdvertised(capabilities = {}, method) {
+  switch (method) {
+    case 'textDocument/hover':
+      return Boolean(capabilities.hoverProvider);
+    case 'textDocument/completion':
+      return Boolean(capabilities.completionProvider);
+    case 'textDocument/semanticTokens/full':
+      return Boolean(capabilities.semanticTokensProvider?.full);
+    case 'textDocument/formatting':
+      return Boolean(capabilities.documentFormattingProvider);
+    default:
+      return null;
+  }
 }
 
 function globRegex(glob) {

@@ -46,6 +46,11 @@ function parseMessages() {
 
 function resultFor(method, params) {
   if (method === 'initialize') {
+    const disabled = new Set(
+      (process.env.CODE_INTEL_FAKE_DISABLED_CAPABILITIES || '')
+        .split(',')
+        .filter(Boolean)
+    );
     const capabilities = {
       documentSymbolProvider: true,
       definitionProvider: true,
@@ -54,6 +59,19 @@ function resultFor(method, params) {
         ? true
         : { prepareProvider: true }
     };
+    if (!disabled.has('hover')) capabilities.hoverProvider = true;
+    if (!disabled.has('completion')) {
+      capabilities.completionProvider = { triggerCharacters: ['.'] };
+    }
+    if (!disabled.has('semanticTokens')) {
+      capabilities.semanticTokensProvider = {
+        legend: { tokenTypes: ['class', 'function'], tokenModifiers: [] },
+        full: true
+      };
+    }
+    if (!disabled.has('formatting')) {
+      capabilities.documentFormattingProvider = true;
+    }
     if (process.env.CODE_INTEL_FAKE_WORKSPACE_CAPABILITIES === '1') {
       capabilities.workspace = {
         workspaceFolders: { supported: true, changeNotifications: true }
@@ -145,6 +163,42 @@ function resultFor(method, params) {
         ]
       }
     };
+  }
+  if (method === 'textDocument/hover') {
+    return {
+      contents: { kind: 'markdown', value: '**add**(left, right)' },
+      range: range(10, 14, 10, 17)
+    };
+  }
+  if (method === 'textDocument/completion') {
+    const count = Number(process.env.CODE_INTEL_FAKE_COMPLETION_COUNT || 5);
+    return {
+      isIncomplete: false,
+      items: Array.from({ length: count }, (_, index) => ({
+        label: `fixtureCompletion${index}`,
+        kind: 3,
+        sortText: String(index).padStart(4, '0')
+      }))
+    };
+  }
+  if (method === 'textDocument/semanticTokens/full') {
+    const count = Number(process.env.CODE_INTEL_FAKE_SEMANTIC_TOKEN_COUNT || 5);
+    return {
+      resultId: 'fixture-semantic-tokens',
+      data: Array.from({ length: count }, (_, index) => [
+        index === 0 ? 0 : 1,
+        0,
+        3,
+        index % 2,
+        0
+      ]).flat()
+    };
+  }
+  if (method === 'textDocument/formatting') {
+    return [{
+      range: range(0, 0, 0, 0),
+      newText: '// formatted preview\n'
+    }];
   }
   if (
     method === 'textDocument/diagnostic' &&

@@ -18,7 +18,7 @@ import {
 } from '../mcp/code-intel-server/core.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const EXPECTED_TOOLS = ['capability_discover','capability_route','ast_grep_search','ast_grep_scan','ast_grep_replace_preview','post_edit_audit','lsp_diagnostics','lsp_symbols','lsp_goto_definition','lsp_find_references','lsp_prepare_rename','lsp_rename_preview'];
+const EXPECTED_TOOLS = ['capability_discover','capability_route','ast_grep_search','ast_grep_scan','ast_grep_replace_preview','post_edit_audit','lsp_diagnostics','lsp_symbols','lsp_goto_definition','lsp_find_references','lsp_prepare_rename','lsp_rename_preview','lsp_hover','lsp_completion','lsp_semantic_tokens','lsp_formatting_preview'];
 const SKILLS = ['code-intel','init-code-intel','code-intel-doctor','code-intel-refactor'];
 const REFS = ['routing-policy.md','settings-contract.md','fallback-policy.md','mcp-tool-contract.md','hook-contract.md'];
 const results = [];
@@ -1110,6 +1110,10 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
   const fixtureFile = 'src/math.ts';
   const fixtureUri = pathToFileURL(path.join(fixtureRepoRoot, fixtureFile)).href;
   const fixturePosition = { line: 10, character: 15 };
+  const fixtureTextBeforeExtendedTools = fs.readFileSync(
+    path.join(fixtureRepoRoot, fixtureFile),
+    'utf8'
+  );
   const lspMethodCases = [
     {
       name: 'document symbols',
@@ -1174,6 +1178,55 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
       }
     },
     {
+      name: 'hover',
+      tool: 'lsp_hover',
+      method: 'textDocument/hover',
+      verified: 'hover',
+      args: { position: fixturePosition },
+      matches: (output) =>
+        output.result?.contents?.kind === 'markdown' &&
+        output.result?.contents?.value.includes('add') &&
+        sameJson(output.result?.range, lspRange(10, 14, 10, 17))
+    },
+    {
+      name: 'bounded completion',
+      tool: 'lsp_completion',
+      method: 'textDocument/completion',
+      verified: 'completion',
+      args: { position: fixturePosition, maxResults: 2 },
+      matches: (output) =>
+        output.result?.items?.length === 2 &&
+        output.totalItems === 5 &&
+        output.returnedItems === 2 &&
+        output.maxResults === 2 &&
+        output.truncated === true
+    },
+    {
+      name: 'bounded semantic tokens',
+      tool: 'lsp_semantic_tokens',
+      method: 'textDocument/semanticTokens/full',
+      verified: 'full',
+      args: { maxResults: 2 },
+      matches: (output) =>
+        output.result?.data?.length === 10 &&
+        output.totalItems === 5 &&
+        output.returnedItems === 2 &&
+        output.maxResults === 2 &&
+        output.truncated === true
+    },
+    {
+      name: 'formatting preview',
+      tool: 'lsp_formatting_preview',
+      method: 'textDocument/formatting',
+      verified: 'formatting',
+      args: { options: { tabSize: 2, insertSpaces: true } },
+      matches: (output) =>
+        output.previewOnly === true &&
+        output.mutated === false &&
+        output.result?.length === 1 &&
+        output.result[0]?.newText === '// formatted preview\n'
+    },
+    {
       name: 'pull diagnostics',
       tool: 'lsp_diagnostics',
       method: 'textDocument/diagnostic',
@@ -1205,6 +1258,56 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
       processResult.stdout.slice(0, 1000) || processResult.stderr.slice(0, 1000)
     );
   }
+  check(
+    'formatting and rename previews leave repository files unchanged',
+    fs.readFileSync(path.join(fixtureRepoRoot, fixtureFile), 'utf8') ===
+      fixtureTextBeforeExtendedTools,
+    fixtureFile
+  );
+
+  const unsupportedHoverTracePath = path.join(
+    fakeLspRoot,
+    'unsupported-hover-trace.jsonl'
+  );
+  const unsupportedHoverProbe = run(process.execPath, ['mcp/code-intel-server/index.js'], {
+    env: {
+      ...fakeLspEnv,
+      CODE_INTEL_LSP_TRACE_FILE: unsupportedHoverTracePath,
+      CODE_INTEL_FAKE_DISABLED_CAPABILITIES: 'hover'
+    },
+    input: Buffer.concat([
+      initializeFrame(),
+      mcpFrame({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: {
+          name: 'lsp_hover',
+          arguments: {
+            repoRoot: fixtureRepoRoot,
+            file: fixtureFile,
+            position: fixturePosition,
+            timeoutMs: 5000
+          }
+        }
+      })
+    ])
+  });
+  const unsupportedHoverOutput = parseProtocolFrames(unsupportedHoverProbe.stdout)
+    .find((message) => message.id === 2)?.result?.structuredContent;
+  const unsupportedHoverTraceRows = readJsonLines(unsupportedHoverTracePath);
+  check(
+    'extended LSP tools reject unadvertised methods before request',
+    unsupportedHoverProbe.status === 0 &&
+      unsupportedHoverOutput?.status === 'unavailable' &&
+      unsupportedHoverOutput.unsupportedCapabilities?.includes('hover') &&
+      /did not advertise hover/.test(unsupportedHoverOutput.fallbackReason || '') &&
+      unsupportedHoverTraceRows.some((row) => row.method === 'initialize') &&
+      !unsupportedHoverTraceRows.some((row) => row.method === 'textDocument/hover') &&
+      !unsupportedHoverTraceRows.some((row) => row.method === 'textDocument/didOpen'),
+    unsupportedHoverProbe.stdout.slice(0, 2000) ||
+      unsupportedHoverProbe.stderr.slice(0, 1000)
+  );
 
   const traceRows = readJsonLines(fakeTracePath);
   const sessions = new Map();

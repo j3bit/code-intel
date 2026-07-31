@@ -16,3 +16,13 @@ Initial tools:
 - `lsp_find_references`
 - `lsp_prepare_rename`
 - `lsp_rename_preview`
+- `lsp_hover`
+- `lsp_completion`
+- `lsp_semantic_tokens`
+- `lsp_formatting_preview`
+
+The four extended read tools require the corresponding initialize capability
+before sending a method request. Completion and semantic-token results report
+`totalItems`, `returnedItems`, `maxResults`, and `truncated`; callers cannot raise
+the limit above 1000. Formatting returns only `TextEdit` preview data with
+`previewOnly: true` and `mutated: false`.

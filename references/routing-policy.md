@@ -20,3 +20,7 @@ Fallback is not failure. It lowers confidence and should be visible in the final
 - Rewrite structural pattern: use `ast_grep_replace_preview` only; apply approved changes through normal edits.
 - Rule-based AST audit: use `ast_grep_scan` when `astGrep.configPath` is configured.
 - Edit file then audit: use `post_edit_audit` with edited repo-relative files; it runs LSP diagnostics when available and ast-grep scan when configured.
+- Inspect symbol context: use `lsp_hover` when the server advertises hover.
+- Request candidates: use `lsp_completion` with a bounded `maxResults`.
+- Inspect semantic classification: use `lsp_semantic_tokens` with a bounded `maxResults`.
+- Preview formatting: use `lsp_formatting_preview`; apply reviewed edits separately.
