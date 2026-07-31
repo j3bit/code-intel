@@ -76,6 +76,7 @@ export function readLspMessagesFromBuffer(state) {
     const header = state.buffer.toString('utf8', 0, headerEnd);
     const match = header.match(/Content-Length:\s*(\d+)/i);
     if (!match) {
+      state.protocolErrors?.push(new Error('missing Content-Length header'));
       state.buffer = state.buffer.subarray(headerEnd + 4);
       continue;
     }
@@ -85,7 +86,11 @@ export function readLspMessagesFromBuffer(state) {
     if (state.buffer.length < bodyEnd) break;
     const body = state.buffer.toString('utf8', bodyStart, bodyEnd);
     state.buffer = state.buffer.subarray(bodyEnd);
-    try { messages.push(JSON.parse(body)); } catch {}
+    try {
+      messages.push(JSON.parse(body));
+    } catch (error) {
+      state.protocolErrors?.push(error);
+    }
   }
   return messages;
 }

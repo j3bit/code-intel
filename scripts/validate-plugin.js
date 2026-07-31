@@ -4,7 +4,16 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { tools, callTool, loadSettings, validateSettings, splitCommandLine, lspDiagnosticsForFile, postEditAudit } from '../mcp/code-intel-server/core.js';
+import {
+  tools,
+  callTool,
+  loadSettings,
+  validateSettings,
+  splitCommandLine,
+  lspDiagnosticsForFile,
+  postEditAudit,
+  LspSessionManager
+} from '../mcp/code-intel-server/core.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const EXPECTED_TOOLS = ['capability_discover','capability_route','ast_grep_search','ast_grep_scan','ast_grep_replace_preview','post_edit_audit','lsp_diagnostics','lsp_symbols','lsp_goto_definition','lsp_find_references','lsp_prepare_rename','lsp_rename_preview'];
@@ -37,6 +46,14 @@ function isolatedSettingsEnv(root) {
     CODE_INTEL_USER_SETTINGS_PATH: path.join(root, 'missing-user-settings.json'),
     CODE_INTEL_PROJECT_SETTINGS_PATH: path.join(root, 'missing-project-settings.json')
   };
+}
+async function waitForCondition(predicate, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return predicate();
 }
 function validateSkillFrontmatter(relPath) {
   const body = fs.readFileSync(path.join(ROOT, relPath), 'utf8');
@@ -356,6 +373,7 @@ const requiredServerModules = [
   'capabilities.js',
   'ast-grep.js',
   'lsp.js',
+  'lsp-session-manager.js',
   'audit.js',
   'audit-result.js',
   'tools.js'
@@ -886,13 +904,230 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
       .filter((row) => row.event === 'process-start')
       .map((row) => row.pid)
   );
+  const multiCallSessionRows = [...multiCallProcesses].length === 1
+    ? multiCallTraceRows.filter((row) => row.pid === [...multiCallProcesses][0])
+    : [];
+  const multiCallMethods = multiCallSessionRows
+    .filter((row) => row.event === 'receive')
+    .map((row) => row.method);
   check(
-    'same MCP process fixture captures per-tool LSP process gap',
+    'same MCP process reuses one repository LSP session',
     multiCallProbe.status === 0 &&
-      multiCallResponses.some((message) => message.id === 2 && message.result?.structuredContent?.status === 'ok') &&
-      multiCallResponses.some((message) => message.id === 3 && message.result?.structuredContent?.status === 'ok') &&
-      multiCallProcesses.size === 2,
-    `lspProcesses=${multiCallProcesses.size}; persistent-target=1`
+      multiCallResponses.some((message) =>
+        message.id === 2 &&
+        message.result?.structuredContent?.status === 'ok' &&
+        message.result.structuredContent.sessionReused === false
+      ) &&
+      multiCallResponses.some((message) =>
+        message.id === 3 &&
+        message.result?.structuredContent?.status === 'ok' &&
+        message.result.structuredContent.sessionReused === true
+      ) &&
+      multiCallProcesses.size === 1 &&
+      multiCallMethods.filter((method) => method === 'initialize').length === 1 &&
+      multiCallMethods.filter((method) => method === 'textDocument/didOpen').length === 1 &&
+      multiCallMethods.includes('textDocument/documentSymbol') &&
+      multiCallMethods.includes('textDocument/definition') &&
+      multiCallMethods.filter((method) => method === 'textDocument/didClose').length === 1 &&
+      multiCallMethods.filter((method) => method === 'shutdown').length === 1 &&
+      multiCallMethods.filter((method) => method === 'exit').length === 1,
+    `lspProcesses=${multiCallProcesses.size}; methods=${multiCallMethods.join(',')}`
+  );
+
+  const isolatedRepoRoot = path.join(fakeLspRoot, 'isolated-repo');
+  fs.cpSync(fixtureRepoRoot, isolatedRepoRoot, { recursive: true });
+  const isolationTracePath = path.join(fakeLspRoot, 'session-isolation-trace.jsonl');
+  const isolationProbe = run(process.execPath, ['mcp/code-intel-server/index.js'], {
+    env: {
+      ...fakeLspEnv,
+      CODE_INTEL_LSP_TRACE_FILE: isolationTracePath
+    },
+    input: Buffer.concat([
+      initializeFrame(),
+      mcpFrame({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: {
+          name: 'lsp_symbols',
+          arguments: {
+            repoRoot: fixtureRepoRoot,
+            file: fixtureFile,
+            initializationOptions: { profile: 'a' },
+            timeoutMs: 5000
+          }
+        }
+      }),
+      mcpFrame({
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'tools/call',
+        params: {
+          name: 'lsp_goto_definition',
+          arguments: {
+            repoRoot: fixtureRepoRoot,
+            file: fixtureFile,
+            position: fixturePosition,
+            initializationOptions: { profile: 'a' },
+            timeoutMs: 5000
+          }
+        }
+      }),
+      mcpFrame({
+        jsonrpc: '2.0',
+        id: 4,
+        method: 'tools/call',
+        params: {
+          name: 'lsp_symbols',
+          arguments: {
+            repoRoot: fixtureRepoRoot,
+            file: fixtureFile,
+            initializationOptions: { profile: 'b' },
+            timeoutMs: 5000
+          }
+        }
+      }),
+      mcpFrame({
+        jsonrpc: '2.0',
+        id: 5,
+        method: 'tools/call',
+        params: {
+          name: 'lsp_symbols',
+          arguments: {
+            repoRoot: isolatedRepoRoot,
+            file: fixtureFile,
+            initializationOptions: { profile: 'a' },
+            timeoutMs: 5000
+          }
+        }
+      })
+    ])
+  });
+  const isolationResponses = parseProtocolFrames(isolationProbe.stdout);
+  const isolationTraceRows = readJsonLines(isolationTracePath);
+  const isolationProcesses = new Set(
+    isolationTraceRows.filter((row) => row.event === 'process-start').map((row) => row.pid)
+  );
+  const isolationInitializes = isolationTraceRows.filter((row) =>
+    row.event === 'receive' && row.method === 'initialize'
+  );
+  check(
+    'LSP session key isolates repository and initialization options',
+    isolationProbe.status === 0 &&
+      [2, 3, 4, 5].every((id) =>
+        isolationResponses.some((message) => message.id === id && message.result?.structuredContent?.status === 'ok')
+      ) &&
+      isolationProcesses.size === 3 &&
+      isolationInitializes.length === 3 &&
+      isolationInitializes.filter((row) => row.initializationOptions?.profile === 'a').length === 2 &&
+      isolationInitializes.filter((row) => row.initializationOptions?.profile === 'b').length === 1 &&
+      new Set(isolationInitializes.map((row) => row.rootUri)).size === 2,
+    `lspProcesses=${isolationProcesses.size}; initializes=${JSON.stringify(isolationInitializes)}`
+  );
+
+  const auditFile = 'src/other.ts';
+  fs.writeFileSync(
+    path.join(isolatedRepoRoot, auditFile),
+    'export const other = 1;\n'
+  );
+  const auditSessionTracePath = path.join(fakeLspRoot, 'audit-session-trace.jsonl');
+  const auditSessionProbe = run(process.execPath, ['mcp/code-intel-server/index.js'], {
+    env: {
+      ...fakeLspEnv,
+      CODE_INTEL_LSP_TRACE_FILE: auditSessionTracePath
+    },
+    input: Buffer.concat([
+      initializeFrame(),
+      mcpFrame({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: {
+          name: 'post_edit_audit',
+          arguments: {
+            repoRoot: isolatedRepoRoot,
+            files: [fixtureFile, auditFile],
+            timeoutMs: 5000
+          }
+        }
+      })
+    ])
+  });
+  const auditSessionResponses = parseProtocolFrames(auditSessionProbe.stdout);
+  const auditSessionTraceRows = readJsonLines(auditSessionTracePath);
+  const auditSessionOutput = auditSessionResponses.find((message) => message.id === 2)
+    ?.result?.structuredContent;
+  const auditSessionMethods = auditSessionTraceRows
+    .filter((row) => row.event === 'receive')
+    .map((row) => row.method);
+  const auditInitializeAt = auditSessionMethods.indexOf('initialize');
+  const auditInitializedAt = auditSessionMethods.indexOf('initialized');
+  const auditFirstOpenAt = auditSessionMethods.indexOf('textDocument/didOpen');
+  check(
+    'post-edit audit reuses one LSP session across repository files',
+    auditSessionProbe.status === 0 &&
+      auditSessionOutput?.status === 'ok' &&
+      auditSessionOutput.diagnostics?.length === 2 &&
+      auditSessionOutput.diagnostics.every((diagnostic) => diagnostic.status === 'ok') &&
+      auditSessionTraceRows.filter((row) => row.event === 'process-start').length === 1 &&
+      auditSessionTraceRows.filter((row) =>
+        row.event === 'receive' && row.method === 'textDocument/didOpen'
+      ).length === 2 &&
+      auditSessionTraceRows.filter((row) =>
+        row.event === 'receive' && row.method === 'textDocument/diagnostic'
+      ).length === 2 &&
+      auditInitializeAt >= 0 &&
+      auditInitializedAt > auditInitializeAt &&
+      auditFirstOpenAt > auditInitializedAt &&
+      auditSessionTraceRows.some((row) =>
+        row.event === 'receive' && row.method === 'shutdown'
+      ),
+    auditSessionProbe.stdout.slice(0, 1000) || auditSessionProbe.stderr.slice(0, 1000)
+  );
+
+  const changeRepoRoot = path.join(fakeLspRoot, 'change-repo');
+  fs.cpSync(fixtureRepoRoot, changeRepoRoot, { recursive: true });
+  const changeTracePath = path.join(fakeLspRoot, 'document-change-trace.jsonl');
+  const changeManager = new LspSessionManager({
+    env: { ...fakeLspEnv, CODE_INTEL_LSP_TRACE_FILE: changeTracePath }
+  });
+  const changeArgs = {
+    repoRoot: changeRepoRoot,
+    file: fixtureFile,
+    settingsPathExtraDirs: [fakeBinDir],
+    timeoutMs: 5000
+  };
+  const beforeChange = await changeManager.request(
+    'fake-no-version-lsp --stdio',
+    { language: 'typescript' },
+    'textDocument/documentSymbol',
+    changeArgs
+  );
+  fs.appendFileSync(path.join(changeRepoRoot, fixtureFile), '\nexport const changed = true;\n');
+  const afterChange = await changeManager.request(
+    'fake-no-version-lsp --stdio',
+    { language: 'typescript' },
+    'textDocument/definition',
+    { ...changeArgs, position: fixturePosition }
+  );
+  await changeManager.shutdownAll();
+  const changeTraceRows = readJsonLines(changeTracePath);
+  check(
+    'persistent LSP session sends didChange with monotonic document version',
+    beforeChange.documentVersion === 1 &&
+      afterChange.documentVersion === 2 &&
+      afterChange.sessionReused === true &&
+      changeTraceRows.filter((row) => row.event === 'process-start').length === 1 &&
+      changeTraceRows.filter((row) =>
+        row.event === 'receive' && row.method === 'textDocument/didOpen' && row.version === 1
+      ).length === 1 &&
+      changeTraceRows.filter((row) =>
+        row.event === 'receive' && row.method === 'textDocument/didChange' && row.version === 2
+      ).length === 1 &&
+      changeTraceRows.some((row) =>
+        row.event === 'receive' && row.method === 'textDocument/didClose'
+      ),
+    JSON.stringify(changeTraceRows)
   );
 
   const lifecycleTracePath = path.join(fakeLspRoot, 'document-lifecycle-trace.jsonl');
@@ -976,6 +1211,110 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
         row.exitCode === 86
       ),
     crashProbe.processResult.stdout.slice(0, 1000) || crashProbe.processResult.stderr.slice(0, 1000)
+  );
+
+  const crashRecoveryTracePath = path.join(fakeLspRoot, 'crash-recovery-trace.jsonl');
+  const crashOnceFile = path.join(fakeLspRoot, 'crash-once.marker');
+  const crashRecoveryProbe = run(process.execPath, ['mcp/code-intel-server/index.js'], {
+    env: {
+      ...fakeLspEnv,
+      CODE_INTEL_LSP_TRACE_FILE: crashRecoveryTracePath,
+      CODE_INTEL_FAKE_CRASH_ON_METHOD: 'textDocument/documentSymbol',
+      CODE_INTEL_FAKE_CRASH_ONCE_FILE: crashOnceFile
+    },
+    input: Buffer.concat([
+      initializeFrame(),
+      mcpFrame({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: {
+          name: 'lsp_symbols',
+          arguments: { repoRoot: fixtureRepoRoot, file: fixtureFile, timeoutMs: 5000 }
+        }
+      })
+    ])
+  });
+  const crashRecoveryResponses = parseProtocolFrames(crashRecoveryProbe.stdout);
+  const crashRecoveryTraceRows = readJsonLines(crashRecoveryTracePath);
+  check(
+    'persistent LSP session restarts once after a process crash',
+    crashRecoveryProbe.status === 0 &&
+      crashRecoveryResponses.some((message) =>
+        message.id === 2 &&
+        message.result?.structuredContent?.status === 'ok' &&
+        message.result.structuredContent.restarted === true
+      ) &&
+      crashRecoveryTraceRows.filter((row) => row.event === 'process-start').length === 2 &&
+      crashRecoveryTraceRows.filter((row) => row.event === 'process-crash').length === 1 &&
+      crashRecoveryTraceRows.filter((row) =>
+        row.event === 'receive' && row.method === 'textDocument/documentSymbol'
+      ).length === 2,
+    crashRecoveryProbe.stdout.slice(0, 1000) || crashRecoveryProbe.stderr.slice(0, 1000)
+  );
+
+  const repeatedCrashTracePath = path.join(fakeLspRoot, 'repeated-crash-trace.jsonl');
+  const repeatedCrashProbe = run(process.execPath, ['mcp/code-intel-server/index.js'], {
+    env: {
+      ...fakeLspEnv,
+      CODE_INTEL_LSP_TRACE_FILE: repeatedCrashTracePath,
+      CODE_INTEL_FAKE_CRASH_ON_METHOD: 'textDocument/documentSymbol'
+    },
+    input: Buffer.concat([
+      initializeFrame(),
+      mcpFrame({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: {
+          name: 'lsp_symbols',
+          arguments: { repoRoot: fixtureRepoRoot, file: fixtureFile, timeoutMs: 5000 }
+        }
+      })
+    ])
+  });
+  const repeatedCrashResponses = parseProtocolFrames(repeatedCrashProbe.stdout);
+  const repeatedCrashTraceRows = readJsonLines(repeatedCrashTracePath);
+  check(
+    'persistent LSP session degrades after one failed restart',
+    repeatedCrashProbe.status === 0 &&
+      repeatedCrashResponses.some((message) =>
+        message.id === 2 &&
+        message.result?.structuredContent?.status === 'unavailable' &&
+        /exited/.test(message.result.structuredContent.fallbackReason || '')
+      ) &&
+      repeatedCrashTraceRows.filter((row) => row.event === 'process-start').length === 2 &&
+      repeatedCrashTraceRows.filter((row) => row.event === 'process-crash').length === 2,
+    repeatedCrashProbe.stdout.slice(0, 1000) || repeatedCrashProbe.stderr.slice(0, 1000)
+  );
+
+  const idleTracePath = path.join(fakeLspRoot, 'idle-cleanup-trace.jsonl');
+  const idleManager = new LspSessionManager({
+    idleTimeoutMs: 25,
+    env: { ...fakeLspEnv, CODE_INTEL_LSP_TRACE_FILE: idleTracePath }
+  });
+  const idleResult = await idleManager.request(
+    'fake-no-version-lsp --stdio',
+    { language: 'typescript' },
+    'textDocument/documentSymbol',
+    {
+    repoRoot: fixtureRepoRoot,
+    file: fixtureFile,
+    settingsPathExtraDirs: [fakeBinDir],
+    timeoutMs: 5000
+    }
+  );
+  const idleClosed = await waitForCondition(() => idleManager.sessions.size === 0, 1000);
+  const idleTraceRows = readJsonLines(idleTracePath);
+  await idleManager.shutdownAll();
+  check(
+    'idle LSP session closes documents and process cleanly',
+    Array.isArray(idleResult.response?.result) &&
+      idleClosed &&
+      idleTraceRows.some((row) => row.event === 'receive' && row.method === 'textDocument/didClose') &&
+      idleTraceRows.some((row) => row.event === 'receive' && row.method === 'shutdown') &&
+      idleTraceRows.some((row) => row.event === 'receive' && row.method === 'exit'),
+    `sessions=${idleManager.sessions.size}; trace=${JSON.stringify(idleTraceRows)}`
   );
 
   const pushTracePath = path.join(fakeLspRoot, 'push-diagnostics-trace.jsonl');

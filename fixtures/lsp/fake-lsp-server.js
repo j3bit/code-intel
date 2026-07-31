@@ -147,13 +147,28 @@ function updateDocumentState(message) {
   }
 }
 
+function shouldCrash(message) {
+  if (message.method !== process.env.CODE_INTEL_FAKE_CRASH_ON_METHOD) return false;
+  const crashOnceFile = process.env.CODE_INTEL_FAKE_CRASH_ONCE_FILE;
+  if (!crashOnceFile) return true;
+  try {
+    fs.writeFileSync(crashOnceFile, String(process.pid), { flag: 'wx' });
+    return true;
+  } catch (error) {
+    if (error.code === 'EEXIST') return false;
+    throw error;
+  }
+}
+
 function handle(message) {
   trace('receive', {
     id: message.id ?? null,
     method: message.method || null,
-    version: message.params?.textDocument?.version ?? null
+    version: message.params?.textDocument?.version ?? null,
+    rootUri: message.params?.rootUri ?? null,
+    initializationOptions: message.params?.initializationOptions ?? null
   });
-  if (message.method === process.env.CODE_INTEL_FAKE_CRASH_ON_METHOD) {
+  if (shouldCrash(message)) {
     trace('process-crash', { method: message.method, exitCode: 86 });
     process.exit(86);
   }

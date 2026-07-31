@@ -38,7 +38,14 @@
   open/change/close, crash, push-only diagnostics gap fixture, init inventory
   oracle를 추가했다.
 - init/doctor validation을 ambient user settings에서 격리했다.
-- 현재 사용자 설정을 포함한 기본 validation은 194/194 통과한다.
+- 2026-07-31: P0-2 완료. 장기 실행 MCP 경로에 repository-scoped LSP
+  session manager를 연결했다. session key는 repository, resolved
+  executable/argv, language, initialization options를 포함한다.
+- 같은 session의 initialize 재사용, 문서 open/change/close와 version 증가,
+  repository/initialization options 격리, idle/MCP 종료 cleanup, crash 후
+  1회 재시작을 검증한다. `post_edit_audit`도 저장소 안의 여러 파일에서 같은
+  session을 사용한다.
+- 현재 사용자 설정을 포함한 기본 validation은 201/201 통과한다.
 
 ### 사용자 언어 도구
 

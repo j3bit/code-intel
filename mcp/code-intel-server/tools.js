@@ -2,6 +2,7 @@ import { discoverCapabilities, resolveCapabilityRoute } from './capabilities.js'
 import { astGrepSearch, astGrepScan, astGrepReplacePreview } from './ast-grep.js';
 import { postEditAudit } from './audit.js';
 import { lspTool } from './lsp.js';
+import { lspToolWithSession } from './lsp-session-manager.js';
 
 export const TOOL_NAMES = [
   'capability_discover',
@@ -18,20 +19,33 @@ export const TOOL_NAMES = [
   'lsp_rename_preview'
 ];
 
-export function callTool(name, args = {}) {
+function callLspTool(runtime, method, args) {
+  return runtime.lspSessionManager
+    ? lspToolWithSession(runtime.lspSessionManager, method, args)
+    : lspTool(method, args);
+}
+
+function renamePreview(result) {
+  if (result && typeof result.then === 'function') {
+    return result.then((value) => ({ ...value, previewOnly: true, mutated: false }));
+  }
+  return { ...result, previewOnly: true, mutated: false };
+}
+
+export function callTool(name, args = {}, runtime = {}) {
   switch (name) {
     case 'capability_discover': return discoverCapabilities(args.repoRoot || process.cwd());
     case 'capability_route': return resolveCapabilityRoute(args);
     case 'ast_grep_search': return astGrepSearch(args);
     case 'ast_grep_scan': return astGrepScan(args);
     case 'ast_grep_replace_preview': return astGrepReplacePreview(args);
-    case 'post_edit_audit': return postEditAudit(args);
-    case 'lsp_diagnostics': return lspTool('textDocument/diagnostic', args);
-    case 'lsp_symbols': return lspTool('textDocument/documentSymbol', args);
-    case 'lsp_goto_definition': return lspTool('textDocument/definition', args);
-    case 'lsp_find_references': return lspTool('textDocument/references', args);
-    case 'lsp_prepare_rename': return lspTool('textDocument/prepareRename', args);
-    case 'lsp_rename_preview': return { ...lspTool('textDocument/rename', args), previewOnly: true, mutated: false };
+    case 'post_edit_audit': return postEditAudit(args, runtime);
+    case 'lsp_diagnostics': return callLspTool(runtime, 'textDocument/diagnostic', args);
+    case 'lsp_symbols': return callLspTool(runtime, 'textDocument/documentSymbol', args);
+    case 'lsp_goto_definition': return callLspTool(runtime, 'textDocument/definition', args);
+    case 'lsp_find_references': return callLspTool(runtime, 'textDocument/references', args);
+    case 'lsp_prepare_rename': return callLspTool(runtime, 'textDocument/prepareRename', args);
+    case 'lsp_rename_preview': return renamePreview(callLspTool(runtime, 'textDocument/rename', args));
     default: throw new Error(`unknown tool: ${name}`);
   }
 }

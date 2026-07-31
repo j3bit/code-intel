@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { callTool, tools } from './tools.js';
+import { LspSessionManager } from './lsp-session-manager.js';
 
 function json(value) { process.stdout.write(JSON.stringify(value, null, 2) + '\n'); }
 
@@ -30,6 +31,8 @@ if (cli['call-tool']) {
 
 const SUPPORTED_PROTOCOL_VERSIONS = ['2024-11-05'];
 const DEFAULT_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0];
+const lspSessionManager = new LspSessionManager();
+const runtime = { lspSessionManager };
 
 function negotiateProtocolVersion(requested) {
   return SUPPORTED_PROTOCOL_VERSIONS.includes(requested) ? requested : DEFAULT_PROTOCOL_VERSION;
@@ -50,7 +53,7 @@ async function handle(msg) {
   if (msg.method === 'tools/list') return result(msg.id, { tools });
   if (msg.method === 'tools/call') {
     try {
-      const value = await callTool(msg.params?.name, msg.params?.arguments || {});
+      const value = await callTool(msg.params?.name, msg.params?.arguments || {}, runtime);
       return result(msg.id, { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }], structuredContent: value });
     } catch (err) {
       return error(msg.id, -32000, err.message);
@@ -115,10 +118,26 @@ async function processBuffer() {
   }
 }
 
-process.stdin.on('data', async (chunk) => {
+let processing = Promise.resolve();
+
+process.stdin.on('data', (chunk) => {
   buffer = Buffer.concat([buffer, chunk]);
-  await processBuffer();
+  processing = processing.then(processBuffer).catch((err) => {
+    sendMessage(error(null, -32603, err.message));
+  });
 });
-process.stdin.on('end', async () => {
-  if (buffer.length && framedMode !== true) await processJsonLine(buffer.toString('utf8'));
+process.stdin.on('end', () => {
+  processing = processing.then(async () => {
+    if (buffer.length && framedMode !== true) await processJsonLine(buffer.toString('utf8'));
+    await lspSessionManager.shutdownAll();
+  });
 });
+
+async function shutdownForSignal(code) {
+  await processing.catch(() => {});
+  await lspSessionManager.shutdownAll();
+  process.exit(code);
+}
+
+process.once('SIGINT', () => { void shutdownForSignal(130); });
+process.once('SIGTERM', () => { void shutdownForSignal(143); });
