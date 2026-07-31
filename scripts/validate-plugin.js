@@ -757,6 +757,140 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
     lspDiscovery.languages?.typescript?.lsp === 'commandDetected' && lspDiscovery.languages.typescript.lspCommand === 'fake-no-version-lsp --stdio',
     lspDiscoveryProbe.stdout.slice(0, 800) || lspDiscoveryProbe.stderr.slice(0, 800)
   );
+  const badRuntimeLsp = path.join(fakeBinDir, 'bad-runtime-lsp');
+  fs.writeFileSync(badRuntimeLsp, '#!/bin/sh\nexit 72\n');
+  fs.chmodSync(badRuntimeLsp, 0o755);
+  const structuredSettingsPath = path.join(fakeLspRoot, 'structured-settings.json');
+  const structuredTracePath = path.join(fakeLspRoot, 'structured-settings-trace.jsonl');
+  const structuredInitializationOptions = {
+    tsserver: { path: '/fixture/node_modules/typescript/lib' }
+  };
+  const structuredServerSettings = {
+    typescript: { preferences: { quotePreference: 'single' } }
+  };
+  writeJson(structuredSettingsPath, {
+    version: 1,
+    path: { extraDirs: [fakeBinDir] },
+    astGrep: { command: 'ast-grep', configPath: null },
+    fallback: ['rg', 'grep'],
+    languages: {
+      typescript: {
+        extensions: ['.ts'],
+        astGrep: { languageId: 'typescript' },
+        lsp: {
+          languageId: 'typescriptreact',
+          command: 'bad-runtime-lsp',
+          args: ['--stdio'],
+          commands: ['fake-no-version-lsp --stdio'],
+          initializationOptions: structuredInitializationOptions,
+          settings: structuredServerSettings,
+          expectedCapabilities: ['symbols', 'rename', 'prepareRename', 'hover']
+        }
+      }
+    }
+  });
+  const structuredEnv = {
+    ...fakeLspEnv,
+    CODE_INTEL_DEFAULT_SETTINGS_PATH: structuredSettingsPath,
+    CODE_INTEL_LSP_TRACE_FILE: structuredTracePath,
+    CODE_INTEL_FAKE_PREPARE_RENAME: 'unsupported'
+  };
+  const structuredDiscoveryProbe = runToolProbe('capability_discover', {
+    repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic')
+  }, structuredEnv);
+  const structuredInfo = structuredDiscoveryProbe.output.languages?.typescript;
+  check(
+    'settings accept structured LSP command and preserve legacy candidates',
+    structuredDiscoveryProbe.output.status === 'ok' &&
+      structuredInfo?.languageId === 'typescriptreact' &&
+      structuredInfo?.expectedCapabilities?.includes('hover') &&
+      structuredInfo?.lspCommands?.[0]?.source === 'structured' &&
+      structuredInfo?.lspCommands?.[1]?.source === 'commands',
+    structuredDiscoveryProbe.processResult.stdout.slice(0, 1200) ||
+      structuredDiscoveryProbe.processResult.stderr.slice(0, 1200)
+  );
+  const structuredSymbolsProbe = runToolProbe('lsp_symbols', {
+    repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'),
+    file: 'src/math.ts',
+    timeoutMs: 5000
+  }, structuredEnv);
+  const structuredTraceRows = readJsonLines(structuredTracePath);
+  check(
+    'LSP runtime falls through a failing executable candidate',
+    structuredSymbolsProbe.output.status === 'ok' &&
+      structuredSymbolsProbe.output.command === 'fake-no-version-lsp --stdio' &&
+      structuredSymbolsProbe.output.candidateFailures?.some((failure) =>
+        failure.command === 'bad-runtime-lsp --stdio'
+      ) &&
+      structuredSymbolsProbe.output.expectedCapabilities?.includes('hover') &&
+      structuredSymbolsProbe.output.advertisedCapabilities?.includes('symbols') &&
+      structuredSymbolsProbe.output.verifiedCapabilities?.includes('symbols'),
+    structuredSymbolsProbe.processResult.stdout.slice(0, 1600) ||
+      structuredSymbolsProbe.processResult.stderr.slice(0, 1600)
+  );
+  check(
+    'LSP forwards language id initialization options and server settings',
+    structuredTraceRows.some((row) =>
+      row.method === 'initialize' &&
+      sameJson(row.initializationOptions, structuredInitializationOptions)
+    ) &&
+      structuredTraceRows.some((row) =>
+        row.method === 'workspace/didChangeConfiguration' &&
+        sameJson(row.settings, structuredServerSettings)
+      ) &&
+      structuredTraceRows.some((row) =>
+        row.method === 'textDocument/didOpen' &&
+        row.languageId === 'typescriptreact'
+      ),
+    JSON.stringify(structuredTraceRows)
+  );
+  const prepareWithoutAdvertisement = runToolProbe('lsp_prepare_rename', {
+    repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'),
+    file: 'src/math.ts',
+    position: { line: 10, character: 15 },
+    timeoutMs: 5000
+  }, structuredEnv);
+  const directRenameWithoutPrepare = runToolProbe('lsp_rename_preview', {
+    repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'),
+    file: 'src/math.ts',
+    position: { line: 10, character: 15 },
+    newName: 'sum',
+    timeoutMs: 5000
+  }, structuredEnv);
+  check(
+    'runtime capability distinguishes direct rename from prepare rename',
+    prepareWithoutAdvertisement.output.status === 'error' &&
+      prepareWithoutAdvertisement.output.unsupportedCapabilities?.includes('prepareRename') &&
+      !prepareWithoutAdvertisement.output.advertisedCapabilities?.includes('prepareRename') &&
+      directRenameWithoutPrepare.output.status === 'ok' &&
+      directRenameWithoutPrepare.output.advertisedCapabilities?.includes('rename') &&
+      directRenameWithoutPrepare.output.verifiedCapabilities?.includes('rename'),
+    JSON.stringify({
+      prepare: prepareWithoutAdvertisement.output,
+      rename: directRenameWithoutPrepare.output
+    }).slice(0, 3000)
+  );
+  const structuredDoctorRun = run(
+    'node',
+    [
+      'scripts/doctor-code-intel.js',
+      '--repo',
+      path.join(ROOT, 'fixtures/repos/typescript-basic'),
+      '--json'
+    ],
+    { env: structuredEnv }
+  );
+  const structuredDoctor = JSON.parse(structuredDoctorRun.stdout || '{}');
+  check(
+    'doctor reports expected runtime capabilities candidate and failure',
+    structuredDoctorRun.status === 0 &&
+      structuredDoctor.languages?.typescript?.expectedCapabilities?.includes('hover') &&
+      structuredDoctor.languages?.typescript?.advertisedCapabilities?.includes('symbols') &&
+      structuredDoctor.languages?.typescript?.verifiedCapabilities?.includes('symbols') &&
+      structuredDoctor.languages?.typescript?.candidateInUse === 'fake-no-version-lsp --stdio' &&
+      structuredDoctor.languages?.typescript?.lastFailure?.command === 'bad-runtime-lsp --stdio',
+    structuredDoctorRun.stdout.slice(0, 2500) || structuredDoctorRun.stderr.slice(0, 1000)
+  );
   const fixtureRepoRoot = path.join(ROOT, 'fixtures/repos/typescript-basic');
   const fixtureFile = 'src/math.ts';
   const fixtureUri = pathToFileURL(path.join(fixtureRepoRoot, fixtureFile)).href;

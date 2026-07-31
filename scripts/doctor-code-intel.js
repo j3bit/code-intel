@@ -1,7 +1,11 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
-import { discoverCapabilities, readJson } from '../mcp/code-intel-server/core.js';
+import {
+  discoverCapabilities,
+  lspTool,
+  readJson
+} from '../mcp/code-intel-server/core.js';
 
 function parseArgs(argv) {
   const out = { repo: process.cwd() };
@@ -81,14 +85,52 @@ const repoRoot = path.resolve(args.repo);
 const discovery = discoverCapabilities(repoRoot);
 const profile = loadProfile(repoRoot, discovery);
 const findings = [];
+const languageRuntimes = {};
 if (!discovery.tools.astGrep.available) findings.push({ severity: 'degraded', capability: 'AST search', reason: 'ast-grep executable was not found on PATH', fallback: ['rg', 'grep'] });
 for (const [language, info] of Object.entries(discovery.languages)) {
   if (!info.presentFiles) continue;
   if (info.lsp === 'missing') findings.push({ severity: 'degraded', capability: `${language} LSP`, reason: 'LSP command missing', fallback: info.astGrep === 'available' ? ['ast-grep', 'rg', 'grep'] : ['rg', 'grep'] });
-  else if (info.lsp === 'commandDetected') findings.push({ severity: 'info', capability: `${language} LSP`, reason: 'LSP command detected; method readiness requires initialize/method smoke', fallback: info.astGrep === 'available' ? ['ast-grep', 'rg', 'grep'] : ['rg', 'grep'] });
+  else if (info.lsp === 'commandDetected') {
+    const file = discovery.inventory.languages[language]?.examples?.[0];
+    const result = file
+      ? lspTool('textDocument/documentSymbol', {
+          repoRoot,
+          language,
+          file,
+          timeoutMs: 5000
+        })
+      : null;
+    const runtime = {
+      expectedCapabilities: info.expectedCapabilities,
+      advertisedCapabilities: result?.advertisedCapabilities || [],
+      verifiedCapabilities: result?.verifiedCapabilities || [],
+      unsupportedCapabilities: result?.unsupportedCapabilities || [],
+      candidateInUse: result?.command || info.lspCommand,
+      candidateFailures: result?.candidateFailures || [],
+      lastFailure: result?.candidateFailures?.at(-1) || null,
+      status: result?.status || 'skipped'
+    };
+    languageRuntimes[language] = runtime;
+    const missingExpected = runtime.status === 'ok'
+      ? runtime.expectedCapabilities.filter((capability) =>
+          !runtime.advertisedCapabilities.includes(capability) &&
+          !runtime.verifiedCapabilities.includes(capability)
+        )
+      : runtime.expectedCapabilities;
+    findings.push({
+      severity: runtime.status === 'ok' && !missingExpected.length ? 'info' : 'degraded',
+      capability: `${language} LSP`,
+      reason: runtime.status === 'ok'
+        ? missingExpected.length
+          ? `expected capabilities not advertised or verified: ${missingExpected.join(', ')}`
+          : 'LSP initialize and documentSymbol method verified'
+        : runtime.lastFailure?.reason || result?.fallbackReason || 'LSP runtime probe failed',
+      fallback: info.astGrep === 'available' ? ['ast-grep', 'rg', 'grep'] : ['rg', 'grep']
+    });
+  }
 }
 for (const reason of profile.staleReasons) findings.push({ severity: 'info', capability: 'routing profile', reason, fallback: ['live detection'] });
-const report = { status: findings.some((f) => f.severity === 'degraded') ? 'degraded' : 'ok', repoRoot, generatedAt: discovery.generatedAt, settingsVersion: discovery.settingsVersion, settingsSources: discovery.settingsSources, profile, tools: discovery.tools, findings, commandPolicy: 'this plugin does not call sg' };
+const report = { status: findings.some((f) => f.severity === 'degraded') ? 'degraded' : 'ok', repoRoot, generatedAt: discovery.generatedAt, settingsVersion: discovery.settingsVersion, settingsSources: discovery.settingsSources, profile, tools: discovery.tools, languages: languageRuntimes, findings, commandPolicy: 'this plugin does not call sg' };
 if (args.json) console.log(JSON.stringify(report, null, 2));
 else {
   console.log(`# Code Intel Doctor\n\nRepository: ${repoRoot}\nStatus: ${report.status}\n`);

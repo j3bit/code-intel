@@ -43,10 +43,19 @@
           "lsp": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["commands", "capabilities"],
             "properties": {
+              "languageId": { "type": "string", "minLength": 1 },
+              "command": { "type": "string", "minLength": 1 },
+              "args": { "type": "array", "items": { "type": "string" } },
               "commands": { "type": "array", "items": { "type": "string" } },
-              "capabilities": { "type": "array", "items": { "type": "string" } }
+              "capabilities": { "type": "array", "items": { "type": "string" } },
+              "expectedCapabilities": { "type": "array", "items": { "type": "string" } },
+              "initializationOptions": {
+                "type": ["object", "array", "string", "number", "boolean", "null"]
+              },
+              "settings": {
+                "type": ["object", "array", "string", "number", "boolean", "null"]
+              }
             }
           }
         }

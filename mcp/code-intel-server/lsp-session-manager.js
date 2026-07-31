@@ -5,10 +5,13 @@ import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
 import {
+  advertisedLspCapabilities,
   envWithExtraPathDirs,
   executableOnPath,
+  expectedLspCapabilities,
   findLspCommand,
   languageConfigForFile,
+  lspCapabilityForMethod,
   runtimeFallbackUsed
 } from './capabilities.js';
 import {
@@ -50,29 +53,38 @@ function textHash(text) {
   return createHash('sha256').update(text).digest('hex');
 }
 
-function sessionDescriptor(commandLine, languageRuntime, args, baseEnv) {
+function sessionDescriptor(commandCandidate, languageRuntime, args, baseEnv) {
   const repoRoot = canonicalRepoRoot(args.repoRoot || process.cwd());
-  const commandParts = splitCommandLine(commandLine);
+  const commandParts = typeof commandCandidate === 'string'
+    ? splitCommandLine(commandCandidate)
+    : [commandCandidate.command, ...(commandCandidate.args || [])];
   if (!commandParts.length) {
     throw new LspSessionError('LSP command candidate is empty');
   }
   const pathSettings = { path: { extraDirs: args.settingsPathExtraDirs || [] } };
   const executable = executableOnPath(commandParts[0], repoRoot, pathSettings).path || commandParts[0];
   const argv = [executable, ...commandParts.slice(1)];
-  const initializationOptions = args.initializationOptions || null;
+  const initializationOptions = args.initializationOptions ?? null;
+  const serverSettings = args.serverSettings ?? null;
+  const languageId = languageRuntime.languageId || languageRuntime.language;
   const workspaceFolders = [workspaceFolderForRepo(repoRoot)];
   const key = JSON.stringify(stableValue({
     repoRoot,
     argv,
-    language: languageRuntime.language,
-    initializationOptions
+    languageId,
+    initializationOptions,
+    serverSettings
   }));
   return {
     key,
     repoRoot,
     argv,
-    language: languageRuntime.language,
+    languageId,
     initializationOptions,
+    serverSettings,
+    commandLine: typeof commandCandidate === 'string'
+      ? commandCandidate
+      : commandCandidate.commandLine,
     workspaceFolders,
     env: envWithExtraPathDirs(baseEnv, args.settingsPathExtraDirs, repoRoot)
   };
@@ -152,6 +164,11 @@ class LspSession {
       this.initializeResult.capabilities?.workspace?.workspaceFolders?.supported
     );
     this.sendNotification('initialized', {});
+    if (this.descriptor.serverSettings !== null) {
+      this.sendNotification('workspace/didChangeConfiguration', {
+        settings: this.descriptor.serverSettings
+      });
+    }
     this.touch();
   }
 
@@ -301,7 +318,7 @@ class LspSession {
   async requestForFile(method, filePath, args) {
     const uri = pathToFileURL(filePath).href;
     const text = fs.readFileSync(filePath, 'utf8');
-    const documentVersion = this.ensureDocument(uri, text, this.descriptor.language);
+    const documentVersion = this.ensureDocument(uri, text, this.descriptor.languageId);
     const response = await this.sendRequest(method, lspParams(method, uri, args), args.timeoutMs || 10000);
     return { response, documentVersion };
   }
@@ -309,7 +326,7 @@ class LspSession {
   async diagnosticsForFile(filePath, args) {
     const uri = pathToFileURL(filePath).href;
     const text = fs.readFileSync(filePath, 'utf8');
-    const documentVersion = this.ensureDocument(uri, text, this.descriptor.language);
+    const documentVersion = this.ensureDocument(uri, text, this.descriptor.languageId);
     if (this.initializeResult?.capabilities?.diagnosticProvider) {
       const response = await this.sendRequest(
         'textDocument/diagnostic',
@@ -551,92 +568,157 @@ export class LspSessionManager {
 }
 
 export async function lspToolWithSession(manager, method, args = {}) {
-  const { language, config, command, settings } = findLspCommand(args, args.settingsOverride || null);
+  const {
+    language,
+    config,
+    candidates,
+    settings
+  } = findLspCommand(args, args.settingsOverride || null);
   if (!config) return lspUnavailable(method, args, 'unsupported language or file extension', { settings });
-  const languageRuntime = { language, ...config };
-  if (!command) return lspUnavailable(method, { ...args, language }, 'LSP command missing', { settings });
-  try {
-    const requestArgs = {
-      ...args,
-      settings: { astGrep: settings.astGrep, path: settings.path },
-      settingsPathExtraDirs: settings.path.extraDirs
-    };
-    const result = method === 'textDocument/diagnostic'
-      ? await manager.diagnosticsForFile(command, languageRuntime, requestArgs)
-      : await manager.request(command, languageRuntime, method, requestArgs);
-    if (result.diagnosticsTimedOut) {
-      return lspUnavailable(
-        method,
-        { ...args, language },
-        'timed out waiting for push diagnostics',
-        {
+  const availableCandidates = candidates.filter((candidate) => candidate.available);
+  if (!availableCandidates.length) {
+    return lspUnavailable(method, { ...args, language }, 'LSP command missing', {
+      settings,
+      candidates
+    });
+  }
+  const languageRuntime = {
+    language,
+    languageId: config.lsp.languageId || language,
+    ...config
+  };
+  const requestArgs = {
+    ...args,
+    initializationOptions: Object.prototype.hasOwnProperty.call(args, 'initializationOptions')
+      ? args.initializationOptions
+      : config.lsp.initializationOptions ?? null,
+    serverSettings: Object.prototype.hasOwnProperty.call(args, 'serverSettings')
+      ? args.serverSettings
+      : config.lsp.settings ?? null,
+    settings: { astGrep: settings.astGrep, path: settings.path },
+    settingsPathExtraDirs: settings.path.extraDirs
+  };
+  const expectedCapabilities = expectedLspCapabilities(config);
+  const capability = lspCapabilityForMethod(method);
+  const candidateFailures = [];
+  let lastErrorResult = null;
+  let lastAttemptResult = null;
+  for (const candidate of availableCandidates) {
+    const command = candidate.commandLine;
+    try {
+      const result = method === 'textDocument/diagnostic'
+        ? await manager.diagnosticsForFile(candidate, languageRuntime, requestArgs)
+        : await manager.request(candidate, languageRuntime, method, requestArgs);
+      lastAttemptResult = result;
+      const advertisedCapabilities = advertisedLspCapabilities(
+        result.initializeResult?.capabilities || {}
+      );
+      if (result.diagnosticsTimedOut) {
+        candidateFailures.push({
           command,
+          reason: 'timed out waiting for push diagnostics'
+        });
+        continue;
+      }
+      if (result.response?.error) {
+        lastErrorResult = {
+          status: 'error',
+          method,
+          language,
+          command,
+          error: result.response.error,
+          stderrSummary: result.stderrSummary,
+          fallbackUsed: runtimeFallbackUsed(
+            config,
+            settings,
+            args.repoRoot || process.cwd()
+          ),
+          fallbackReason: 'LSP server returned an error',
+          expectedCapabilities,
+          advertisedCapabilities,
+          verifiedCapabilities: [],
+          unsupportedCapabilities: result.response.error.code === -32601
+            ? [capability]
+            : [],
+          candidateFailures: [
+            ...candidateFailures,
+            { command, reason: result.response.error.message || 'LSP server error' }
+          ],
+          sessionReused: result.sessionReused,
+          restarted: result.restarted,
           transport: result.transport,
           documentVersion: result.documentVersion,
           collectedAt: result.collectedAt,
-          stale: result.stale,
-          settings
-        }
-      );
-    }
-    if (result.response?.error) {
-      return {
-        status: 'error',
-        method,
-        language,
-        command,
-        error: result.response.error,
-        stderrSummary: result.stderrSummary,
-        fallbackUsed: runtimeFallbackUsed(config, settings, args.repoRoot || process.cwd()),
-        fallbackReason: 'LSP server returned an error',
-        sessionReused: result.sessionReused,
-        restarted: result.restarted,
-        transport: result.transport,
-        documentVersion: result.documentVersion,
-        collectedAt: result.collectedAt,
-        stale: result.stale
-      };
-    }
-    if (result.response && Object.prototype.hasOwnProperty.call(result.response, 'result')) {
-      return {
-        status: 'ok',
-        method,
-        language,
-        command,
-        serverInfo: result.initializeResult?.serverInfo || null,
-        serverCapabilities: result.initializeResult?.capabilities || {},
-        lspState: 'methodVerified',
-        methodVerified: method.split('/').pop(),
-        result: result.response.result,
-        documentVersion: result.documentVersion,
-        sessionReused: result.sessionReused,
-        restarted: result.restarted,
-        transport: result.transport,
-        collectedAt: result.collectedAt,
-        stale: result.stale,
-        previewOnly: method === 'textDocument/rename' ? true : undefined,
-        mutated: method === 'textDocument/rename' ? false : undefined,
-        degradedCapability: null,
-        fallbackUsed: null,
-        fallbackReason: null
-      };
-    }
-    return lspUnavailable(method, { ...args, language }, 'LSP server did not return a response for the requested method', {
-      command,
-      stderrSummary: result.stderrSummary
-    });
-  } catch (error) {
-    return lspUnavailable(
-      method,
-      { ...args, language },
-      error.lspError ? 'LSP initialize failed' : error.message,
-      {
-        command,
-        error: error.lspError || { message: error.message },
-        settings
+          stale: result.stale
+        };
+        candidateFailures.push({
+          command,
+          reason: result.response.error.message || 'LSP server error'
+        });
+        continue;
       }
-    );
+      if (
+        result.response &&
+        Object.prototype.hasOwnProperty.call(result.response, 'result')
+      ) {
+        return {
+          status: 'ok',
+          method,
+          language,
+          command,
+          serverInfo: result.initializeResult?.serverInfo || null,
+          serverCapabilities: result.initializeResult?.capabilities || {},
+          expectedCapabilities,
+          advertisedCapabilities,
+          verifiedCapabilities: [capability],
+          unsupportedCapabilities: [],
+          candidateFailures,
+          lspState: 'methodVerified',
+          methodVerified: method.split('/').pop(),
+          result: result.response.result,
+          documentVersion: result.documentVersion,
+          sessionReused: result.sessionReused,
+          restarted: result.restarted,
+          transport: result.transport,
+          collectedAt: result.collectedAt,
+          stale: result.stale,
+          previewOnly: method === 'textDocument/rename' ? true : undefined,
+          mutated: method === 'textDocument/rename' ? false : undefined,
+          degradedCapability: null,
+          fallbackUsed: null,
+          fallbackReason: null
+        };
+      }
+      candidateFailures.push({
+        command,
+        reason: 'LSP server did not return a response for the requested method'
+      });
+    } catch (error) {
+      candidateFailures.push({
+        command,
+        reason: error.lspError ? 'LSP initialize failed' : error.message,
+        error: error.lspError || { message: error.message }
+      });
+    }
   }
+  if (lastErrorResult) return lastErrorResult;
+  const lastFailure = candidateFailures.at(-1);
+  return lspUnavailable(
+    method,
+    { ...args, language },
+    lastFailure?.reason || 'LSP request failed for every candidate',
+    {
+      command: lastFailure?.command || null,
+      candidates,
+      candidateFailures,
+      expectedCapabilities,
+      transport: lastAttemptResult?.transport,
+      documentVersion: lastAttemptResult?.documentVersion,
+      collectedAt: lastAttemptResult?.collectedAt,
+      stale: lastAttemptResult?.stale,
+      settings
+    }
+  );
 }
 
 export async function lspDiagnosticsForFileWithSession(manager, repoRoot, file, settings, timeoutMs) {

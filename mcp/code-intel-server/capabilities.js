@@ -1,7 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { PLUGIN_VERSION, expandHome, firstToken, loadSettings } from './settings.js';
+import {
+  PLUGIN_VERSION,
+  expandHome,
+  loadSettings,
+  splitCommandLine
+} from './settings.js';
 import { walkFiles } from './repo.js';
 
 export function detectExecutable(command, args = ['--version']) {
@@ -80,12 +85,43 @@ export function envWithExtraPathDirs(env = process.env, extraDirs = [], repoRoot
   return { ...env, PATH: [...dirs, env.PATH || ''].filter(Boolean).join(path.delimiter) };
 }
 
-export function commandAvailable(commandLine, baseDir = process.cwd(), settings = null) {
-  const command = firstToken(commandLine);
-  if (!command) return { command: commandLine, available: false, reason: 'no command candidate declared' };
+export function configuredLspCandidates(config) {
+  const candidates = [];
+  if (config?.lsp?.command) {
+    candidates.push({
+      command: config.lsp.command,
+      args: config.lsp.args || [],
+      commandLine: [config.lsp.command, ...(config.lsp.args || [])].join(' '),
+      source: 'structured'
+    });
+  }
+  for (const commandLine of config?.lsp?.commands || []) {
+    const [command, ...args] = splitCommandLine(commandLine);
+    candidates.push({ command, args, commandLine, source: 'commands' });
+  }
+  return candidates;
+}
+
+export function commandAvailable(candidate, baseDir = process.cwd(), settings = null) {
+  const descriptor = typeof candidate === 'string'
+    ? (() => {
+        const [command, ...args] = splitCommandLine(candidate);
+        return { command, args, commandLine: candidate, source: 'commands' };
+      })()
+    : candidate;
+  const command = descriptor?.command;
+  if (!command) {
+    return {
+      ...descriptor,
+      commandLine: descriptor?.commandLine || '',
+      available: false,
+      reason: 'no command candidate declared'
+    };
+  }
   const result = executableOnPath(command, baseDir, settings);
   return {
-    command: commandLine,
+    ...descriptor,
+    commandLine: descriptor.commandLine || [command, ...(descriptor.args || [])].join(' '),
     executable: command,
     executablePath: result.path || null,
     available: result.available,
@@ -93,6 +129,32 @@ export function commandAvailable(commandLine, baseDir = process.cwd(), settings 
       ? 'executable found; LSP method readiness requires initialize/method smoke'
       : result.reason
   };
+}
+
+export function expectedLspCapabilities(config) {
+  return config?.lsp?.expectedCapabilities || config?.lsp?.capabilities || [];
+}
+
+export function advertisedLspCapabilities(capabilities = {}) {
+  const advertised = [];
+  if (capabilities.definitionProvider) advertised.push('definition');
+  if (capabilities.referencesProvider) advertised.push('references');
+  if (capabilities.renameProvider) advertised.push('rename');
+  if (capabilities.renameProvider?.prepareProvider) advertised.push('prepareRename');
+  if (capabilities.diagnosticProvider) advertised.push('diagnostics');
+  if (capabilities.documentSymbolProvider) advertised.push('symbols');
+  return advertised;
+}
+
+export function lspCapabilityForMethod(method) {
+  return {
+    'textDocument/definition': 'definition',
+    'textDocument/references': 'references',
+    'textDocument/prepareRename': 'prepareRename',
+    'textDocument/rename': 'rename',
+    'textDocument/diagnostic': 'diagnostics',
+    'textDocument/documentSymbol': 'symbols'
+  }[method] || method.split('/').pop();
 }
 
 export function languageForFile(file, settings = loadSettings()) {
@@ -138,8 +200,9 @@ export function discoverCapabilities(repoRoot = process.cwd()) {
   const languages = {};
   for (const [language, config] of Object.entries(settings.languages)) {
     const present = inventory.languages[language]?.files || 0;
-    const lspCommands = config.lsp.commands.map((command) => commandAvailable(command, repoRoot, settings));
-    const lspAvailable = lspCommands.find((candidate) => candidate.available)?.command || null;
+    const lspCommands = configuredLspCandidates(config)
+      .map((candidate) => commandAvailable(candidate, repoRoot, settings));
+    const lspAvailable = lspCommands.find((candidate) => candidate.available)?.commandLine || null;
     languages[language] = {
       presentFiles: present,
       extensions: config.extensions,
@@ -151,7 +214,12 @@ export function discoverCapabilities(repoRoot = process.cwd()) {
       methodUnsupported: [],
       lspCommand: lspAvailable,
       lspCommands,
-      capabilities: config.lsp.capabilities,
+      languageId: config.lsp.languageId || language,
+      expectedCapabilities: expectedLspCapabilities(config),
+      advertisedCapabilities: [],
+      verifiedCapabilities: [],
+      unsupportedCapabilities: [],
+      capabilities: expectedLspCapabilities(config),
       fallback: settings.fallback
     };
   }
@@ -215,7 +283,25 @@ export function findLspCommand(args = {}, settingsOverride = null) {
     : args.file
       ? languageConfigForFile(path.resolve(repoRoot, args.file), settings)
       : { language: null, config: null };
-  if (!resolved.config) return { language: resolved.language, config: null, command: null, settings };
-  const available = resolved.config.lsp.commands.map((command) => commandAvailable(command, repoRoot, settings)).find((candidate) => candidate.available);
-  return { language: resolved.language, config: resolved.config, command: available?.command || null, settings };
+  if (!resolved.config) {
+    return {
+      language: resolved.language,
+      config: null,
+      command: null,
+      candidate: null,
+      candidates: [],
+      settings
+    };
+  }
+  const candidates = configuredLspCandidates(resolved.config)
+    .map((candidate) => commandAvailable(candidate, repoRoot, settings));
+  const available = candidates.find((candidate) => candidate.available) || null;
+  return {
+    language: resolved.language,
+    config: resolved.config,
+    command: available?.commandLine || null,
+    candidate: available,
+    candidates,
+    settings
+  };
 }

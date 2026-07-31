@@ -55,7 +55,13 @@
   open/change/close lifecycle을 관리한다.
 - multi-file definition/reference, 변경 후 최신 symbol, 명시적 close 뒤
   diagnostics cache 제거, reopen version 증가를 fixture로 검증한다.
-- 현재 사용자 설정을 포함한 기본 validation은 214/214 통과한다.
+- 2026-07-31: P1-2 완료. structured command/args, languageId,
+  initializationOptions, server settings와 expectedCapabilities를 추가하고
+  기존 commands/capabilities shorthand를 유지한다.
+- 실행 실패 시 다음 LSP candidate로 넘어가며, 결과와 doctor가 expected,
+  advertised, verified, unsupported capability 및 candidate failure를
+  구분해 보고한다.
+- 현재 사용자 설정을 포함한 기본 validation은 219/219 통과한다.
 
 ### 사용자 언어 도구
 

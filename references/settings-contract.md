@@ -15,4 +15,14 @@ The settings schema lives at `settings/schema.json`.
 
 `astGrep.configPath` may point to a separate ast-grep config file, for example `~/.codex/code-intel/sgconfig.yml`. The settings file is not itself an ast-grep config.
 
-`languages` maps language ids to file extensions, ast-grep language ids, LSP command candidates, and declared LSP capabilities.
+`languages` maps language ids to file extensions, ast-grep language ids, LSP
+command candidates, and expected LSP capabilities.
+
+An LSP may use structured `command` and `args`. Legacy `commands` entries remain
+ordered fallback candidates. `languageId`, `initializationOptions`, and `settings`
+are forwarded to the server. `expectedCapabilities` is the preferred declaration;
+legacy `capabilities` is treated as the same expectation for compatibility.
+
+Executable discovery proves only that a candidate can be started. Runtime reports
+separate expected, initialize-advertised, method-verified, and method-unsupported
+capabilities.

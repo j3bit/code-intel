@@ -63,8 +63,31 @@ function lspInitializeSmoke(repoRoot, language, info, discovery) {
   const example = discovery.inventory.languages[language]?.examples?.[0];
   if (!example) return { status: 'skipped', reason: 'no sample file detected for language' };
   const result = lspTool('textDocument/documentSymbol', { repoRoot, language, file: example, timeoutMs: 5000 });
-  if (result.status === 'ok') return { status: 'passed', file: example, command: result.command, serverInfo: result.serverInfo || null, methodVerified: result.methodVerified || 'documentSymbol' };
-  return { status: 'failed', file: example, command: result.command || info.lspCommand, reason: result.fallbackReason || result.error?.message || result.status };
+  if (result.status === 'ok') {
+    return {
+      status: 'passed',
+      file: example,
+      command: result.command,
+      serverInfo: result.serverInfo || null,
+      expectedCapabilities: result.expectedCapabilities || info.expectedCapabilities || [],
+      advertisedCapabilities: result.advertisedCapabilities || [],
+      verifiedCapabilities: result.verifiedCapabilities || [],
+      unsupportedCapabilities: result.unsupportedCapabilities || [],
+      candidateFailures: result.candidateFailures || [],
+      methodVerified: result.methodVerified || 'documentSymbol'
+    };
+  }
+  return {
+    status: 'failed',
+    file: example,
+    command: result.command || info.lspCommand,
+    expectedCapabilities: info.expectedCapabilities || [],
+    advertisedCapabilities: result.advertisedCapabilities || [],
+    verifiedCapabilities: result.verifiedCapabilities || [],
+    unsupportedCapabilities: result.unsupportedCapabilities || [],
+    candidateFailures: result.candidateFailures || [],
+    reason: result.fallbackReason || result.error?.message || result.status
+  };
 }
 
 function markdownCapability(discovery) {
@@ -110,7 +133,7 @@ const profile = {
   settingsVersion: discovery.settingsVersion,
   settingsSources: discovery.settingsSources,
   tools: discovery.tools,
-  languages: Object.fromEntries(Object.entries(discovery.languages).filter(([, v]) => v.presentFiles > 0).map(([k, v]) => [k, { astGrep: v.astGrep, astGrepLanguageId: v.astGrepLanguageId, astGrepSmoke: v.astGrepSmoke, lsp: v.lsp, lspState: v.lspState, lspCommand: v.lspCommand, lspInitializeSmoke: v.lspInitializeSmoke, methodVerified: v.lspInitializeSmoke?.status === 'passed' ? ['documentSymbol'] : [], fallback: v.fallback, files: v.presentFiles }])),
+  languages: Object.fromEntries(Object.entries(discovery.languages).filter(([, v]) => v.presentFiles > 0).map(([k, v]) => [k, { astGrep: v.astGrep, astGrepLanguageId: v.astGrepLanguageId, astGrepSmoke: v.astGrepSmoke, lsp: v.lsp, lspState: v.lspState, lspCommand: v.lspCommand, lspInitializeSmoke: v.lspInitializeSmoke, expectedCapabilities: v.expectedCapabilities, advertisedCapabilities: v.lspInitializeSmoke?.advertisedCapabilities || [], verifiedCapabilities: v.lspInitializeSmoke?.verifiedCapabilities || [], unsupportedCapabilities: v.lspInitializeSmoke?.unsupportedCapabilities || [], methodVerified: v.lspInitializeSmoke?.status === 'passed' ? ['documentSymbol'] : [], fallback: v.fallback, files: v.presentFiles }])),
   inventory: comparableInventory(repoRoot, discovery.inventory),
   staleRules: ['repo root differs', 'settings version differs', 'settings source differs', 'plugin version differs', 'profile timestamp predates material plugin upgrade', 'language inventory major mismatch'],
   commandPolicy: 'this plugin does not call sg'

@@ -50,7 +50,9 @@ function resultFor(method, params) {
       documentSymbolProvider: true,
       definitionProvider: true,
       referencesProvider: true,
-      renameProvider: { prepareProvider: true }
+      renameProvider: process.env.CODE_INTEL_FAKE_PREPARE_RENAME === 'unsupported'
+        ? true
+        : { prepareProvider: true }
     };
     if (process.env.CODE_INTEL_FAKE_WORKSPACE_CAPABILITIES === '1') {
       capabilities.workspace = {
@@ -228,10 +230,14 @@ function handle(message) {
     method: message.method || null,
     version: message.params?.textDocument?.version ?? null,
     uri: message.params?.textDocument?.uri ?? null,
+    languageId: message.params?.textDocument?.languageId ?? null,
     rootUri: message.params?.rootUri ?? null,
     workspaceFolders: message.params?.workspaceFolders ?? null,
     clientCapabilities: message.params?.capabilities ?? null,
-    initializationOptions: message.params?.initializationOptions ?? null
+    initializationOptions: message.params?.initializationOptions ?? null,
+    settings: message.method === 'workspace/didChangeConfiguration'
+      ? message.params?.settings ?? null
+      : null
   });
   if (shouldCrash(message)) {
     trace('process-crash', { method: message.method, exitCode: 86 });
@@ -263,7 +269,16 @@ function handle(message) {
     });
   }
   if (message.id !== undefined) {
-    if (message.method === 'textDocument/diagnostic' && process.env.CODE_INTEL_FAKE_PULL_DIAGNOSTICS === 'unsupported') {
+    if (
+      (
+        message.method === 'textDocument/diagnostic' &&
+        process.env.CODE_INTEL_FAKE_PULL_DIAGNOSTICS === 'unsupported'
+      ) ||
+      (
+        message.method === 'textDocument/prepareRename' &&
+        process.env.CODE_INTEL_FAKE_PREPARE_RENAME === 'unsupported'
+      )
+    ) {
       frame({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Method not found' } });
     } else {
       frame({ jsonrpc: '2.0', id: message.id, result: resultFor(message.method, message.params || {}) });
