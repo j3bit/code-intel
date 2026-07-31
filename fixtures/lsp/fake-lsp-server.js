@@ -44,14 +44,20 @@ function parseMessages() {
 
 function resultFor(method, params) {
   if (method === 'initialize') {
+    const capabilities = {
+      documentSymbolProvider: true,
+      definitionProvider: true,
+      referencesProvider: true,
+      renameProvider: { prepareProvider: true }
+    };
+    if (process.env.CODE_INTEL_FAKE_PULL_DIAGNOSTICS !== 'unsupported') {
+      capabilities.diagnosticProvider = {
+        interFileDependencies: false,
+        workspaceDiagnostics: false
+      };
+    }
     return {
-      capabilities: {
-        documentSymbolProvider: true,
-        definitionProvider: true,
-        referencesProvider: true,
-        renameProvider: { prepareProvider: true },
-        diagnosticProvider: { interFileDependencies: false, workspaceDiagnostics: false }
-      },
+      capabilities,
       serverInfo: { name: 'code-intel-fake-lsp', version: '1.0.0' }
     };
   }
@@ -107,6 +113,12 @@ function resultFor(method, params) {
       }
     };
   }
+  if (
+    method === 'textDocument/diagnostic' &&
+    process.env.CODE_INTEL_FAKE_PULL_DIAGNOSTICS === 'unchanged'
+  ) {
+    return { kind: 'unchanged', resultId: 'fixture-result' };
+  }
   if (method === 'textDocument/diagnostic') return { kind: 'full', items: [fixtureDiagnostic()] };
   if (method === 'shutdown') return null;
   return null;
@@ -160,6 +172,24 @@ function shouldCrash(message) {
   }
 }
 
+function publishDiagnostics(message) {
+  if (process.env.CODE_INTEL_FAKE_PUSH_DIAGNOSTICS !== '1') return;
+  if (!['textDocument/didOpen', 'textDocument/didChange'].includes(message.method)) return;
+  const offset = Number(process.env.CODE_INTEL_FAKE_PUSH_DIAGNOSTICS_VERSION_OFFSET || 0);
+  const emptyOnChange =
+    message.method === 'textDocument/didChange' &&
+    process.env.CODE_INTEL_FAKE_PUSH_DIAGNOSTICS_EMPTY_ON_CHANGE === '1';
+  frame({
+    jsonrpc: '2.0',
+    method: 'textDocument/publishDiagnostics',
+    params: {
+      uri: message.params.textDocument.uri,
+      version: message.params.textDocument.version + offset,
+      diagnostics: emptyOnChange ? [] : [fixtureDiagnostic()]
+    }
+  });
+}
+
 function handle(message) {
   trace('receive', {
     id: message.id ?? null,
@@ -173,17 +203,7 @@ function handle(message) {
     process.exit(86);
   }
   updateDocumentState(message);
-  if (message.method === 'textDocument/didOpen' && process.env.CODE_INTEL_FAKE_PUSH_DIAGNOSTICS === '1') {
-    frame({
-      jsonrpc: '2.0',
-      method: 'textDocument/publishDiagnostics',
-      params: {
-        uri: message.params.textDocument.uri,
-        version: message.params.textDocument.version,
-        diagnostics: [fixtureDiagnostic()]
-      }
-    });
-  }
+  publishDiagnostics(message);
   if (message.id !== undefined) {
     if (message.method === 'textDocument/diagnostic' && process.env.CODE_INTEL_FAKE_PULL_DIAGNOSTICS === 'unsupported') {
       frame({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Method not found' } });

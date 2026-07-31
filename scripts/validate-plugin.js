@@ -12,7 +12,8 @@ import {
   splitCommandLine,
   lspDiagnosticsForFile,
   postEditAudit,
-  LspSessionManager
+  LspSessionManager,
+  LspDiagnosticsBroker
 } from '../mcp/code-intel-server/core.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -373,6 +374,7 @@ const requiredServerModules = [
   'capabilities.js',
   'ast-grep.js',
   'lsp.js',
+  'lsp-diagnostics.js',
   'lsp-session-manager.js',
   'audit.js',
   'audit-result.js',
@@ -381,6 +383,23 @@ const requiredServerModules = [
 for (const moduleFile of requiredServerModules) {
   check(`server boundary module exists: ${moduleFile}`, exists(path.join('mcp/code-intel-server', moduleFile)), moduleFile);
 }
+const diagnosticsBrokerOracle = new LspDiagnosticsBroker();
+diagnosticsBrokerOracle.publish({
+  uri: 'file:///fixture.ts',
+  version: 2,
+  diagnostics: []
+});
+diagnosticsBrokerOracle.publish({
+  uri: 'file:///fixture.ts',
+  version: 1,
+  diagnostics: [{ message: 'stale' }]
+});
+check(
+  'diagnostics broker does not let older versions replace current cache',
+  diagnosticsBrokerOracle.latest('file:///fixture.ts')?.version === 2 &&
+    diagnosticsBrokerOracle.latest('file:///fixture.ts')?.diagnostics?.length === 0,
+  JSON.stringify(diagnosticsBrokerOracle.latest('file:///fixture.ts'))
+);
 const coreSource = fs.readFileSync(path.join(ROOT, 'mcp/code-intel-server/core.js'), 'utf8');
 const coreLineCount = coreSource.split(/\r?\n/).length;
 check('core.js stays facade-sized', coreLineCount <= 260, `${coreLineCount} lines`);
@@ -1336,6 +1355,284 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
       pushTraceRows.some((row) => row.event === 'send' && row.method === 'textDocument/publishDiagnostics') &&
       pushTraceRows.some((row) => row.event === 'receive' && row.method === 'textDocument/diagnostic'),
     pushOnlyProbe.processResult.stdout.slice(0, 1000) || pushOnlyProbe.processResult.stderr.slice(0, 1000)
+  );
+
+  const pullBrokerTracePath = path.join(fakeLspRoot, 'pull-broker-trace.jsonl');
+  const pullBrokerProbe = run(process.execPath, ['mcp/code-intel-server/index.js'], {
+    env: {
+      ...fakeLspEnv,
+      CODE_INTEL_LSP_TRACE_FILE: pullBrokerTracePath
+    },
+    input: Buffer.concat([
+      initializeFrame(),
+      mcpFrame({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: {
+          name: 'lsp_diagnostics',
+          arguments: { repoRoot: fixtureRepoRoot, file: fixtureFile, timeoutMs: 5000 }
+        }
+      })
+    ])
+  });
+  const pullBrokerOutput = parseProtocolFrames(pullBrokerProbe.stdout)
+    .find((message) => message.id === 2)?.result?.structuredContent;
+  const pullBrokerTraceRows = readJsonLines(pullBrokerTracePath);
+  check(
+    'diagnostics broker uses pull when the server advertises diagnosticProvider',
+    pullBrokerProbe.status === 0 &&
+      pullBrokerOutput?.status === 'ok' &&
+      pullBrokerOutput.transport === 'pull' &&
+      pullBrokerOutput.documentVersion === 1 &&
+      pullBrokerOutput.stale === false &&
+      Boolean(pullBrokerOutput.collectedAt) &&
+      pullBrokerOutput.result?.items?.length === 1 &&
+      pullBrokerTraceRows.some((row) =>
+        row.event === 'receive' && row.method === 'textDocument/diagnostic'
+      ),
+    pullBrokerProbe.stdout.slice(0, 1000) || pullBrokerProbe.stderr.slice(0, 1000)
+  );
+
+  const unchangedPullTracePath = path.join(fakeLspRoot, 'unchanged-pull-trace.jsonl');
+  const unchangedPullProbe = run(process.execPath, ['mcp/code-intel-server/index.js'], {
+    env: {
+      ...fakeLspEnv,
+      CODE_INTEL_LSP_TRACE_FILE: unchangedPullTracePath,
+      CODE_INTEL_FAKE_PULL_DIAGNOSTICS: 'unchanged'
+    },
+    input: Buffer.concat([
+      initializeFrame(),
+      mcpFrame({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: {
+          name: 'lsp_diagnostics',
+          arguments: { repoRoot: fixtureRepoRoot, file: fixtureFile, timeoutMs: 5000 }
+        }
+      })
+    ])
+  });
+  const unchangedPullOutput = parseProtocolFrames(unchangedPullProbe.stdout)
+    .find((message) => message.id === 2)?.result?.structuredContent;
+  check(
+    'diagnostics broker preserves unchanged pull reports',
+    unchangedPullProbe.status === 0 &&
+      unchangedPullOutput?.status === 'ok' &&
+      unchangedPullOutput.transport === 'pull' &&
+      unchangedPullOutput.result?.kind === 'unchanged' &&
+      unchangedPullOutput.result?.resultId === 'fixture-result' &&
+      !Object.prototype.hasOwnProperty.call(unchangedPullOutput.result, 'items'),
+    unchangedPullProbe.stdout.slice(0, 1000) || unchangedPullProbe.stderr.slice(0, 1000)
+  );
+
+  const pushBrokerTracePath = path.join(fakeLspRoot, 'push-broker-trace.jsonl');
+  const pushBrokerProbe = run(process.execPath, ['mcp/code-intel-server/index.js'], {
+    env: {
+      ...fakeLspEnv,
+      CODE_INTEL_LSP_TRACE_FILE: pushBrokerTracePath,
+      CODE_INTEL_FAKE_PUSH_DIAGNOSTICS: '1',
+      CODE_INTEL_FAKE_PULL_DIAGNOSTICS: 'unsupported'
+    },
+    input: Buffer.concat([
+      initializeFrame(),
+      mcpFrame({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: {
+          name: 'lsp_diagnostics',
+          arguments: { repoRoot: fixtureRepoRoot, file: fixtureFile, timeoutMs: 5000 }
+        }
+      })
+    ])
+  });
+  const pushBrokerOutput = parseProtocolFrames(pushBrokerProbe.stdout)
+    .find((message) => message.id === 2)?.result?.structuredContent;
+  const pushBrokerTraceRows = readJsonLines(pushBrokerTracePath);
+  check(
+    'diagnostics broker consumes push diagnostics without a pull request',
+    pushBrokerProbe.status === 0 &&
+      pushBrokerOutput?.status === 'ok' &&
+      pushBrokerOutput.transport === 'push' &&
+      pushBrokerOutput.documentVersion === 1 &&
+      pushBrokerOutput.stale === false &&
+      Boolean(pushBrokerOutput.collectedAt) &&
+      pushBrokerOutput.result?.items?.length === 1 &&
+      pushBrokerTraceRows.some((row) =>
+        row.event === 'send' && row.method === 'textDocument/publishDiagnostics'
+      ) &&
+      !pushBrokerTraceRows.some((row) =>
+        row.event === 'receive' && row.method === 'textDocument/diagnostic'
+      ),
+    pushBrokerProbe.stdout.slice(0, 1000) || pushBrokerProbe.stderr.slice(0, 1000)
+  );
+
+  const pushAuditTracePath = path.join(fakeLspRoot, 'push-audit-trace.jsonl');
+  const pushAuditProbe = run(process.execPath, ['mcp/code-intel-server/index.js'], {
+    env: {
+      ...fakeLspEnv,
+      CODE_INTEL_LSP_TRACE_FILE: pushAuditTracePath,
+      CODE_INTEL_FAKE_PUSH_DIAGNOSTICS: '1',
+      CODE_INTEL_FAKE_PULL_DIAGNOSTICS: 'unsupported'
+    },
+    input: Buffer.concat([
+      initializeFrame(),
+      mcpFrame({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: {
+          name: 'post_edit_audit',
+          arguments: {
+            repoRoot: fixtureRepoRoot,
+            files: [fixtureFile],
+            timeoutMs: 5000
+          }
+        }
+      })
+    ])
+  });
+  const pushAuditOutput = parseProtocolFrames(pushAuditProbe.stdout)
+    .find((message) => message.id === 2)?.result?.structuredContent;
+  const pushAuditTraceRows = readJsonLines(pushAuditTracePath);
+  check(
+    'post-edit audit reports push diagnostic provenance',
+    pushAuditProbe.status === 0 &&
+      pushAuditOutput?.diagnostics?.length === 1 &&
+      pushAuditOutput.diagnostics[0]?.status === 'ok' &&
+      pushAuditOutput.diagnostics[0]?.transport === 'push' &&
+      pushAuditOutput.diagnostics[0]?.documentVersion === 1 &&
+      pushAuditOutput.diagnostics[0]?.stale === false &&
+      Boolean(pushAuditOutput.diagnostics[0]?.collectedAt) &&
+      !pushAuditTraceRows.some((row) =>
+        row.event === 'receive' && row.method === 'textDocument/diagnostic'
+      ),
+    pushAuditProbe.stdout.slice(0, 1000) || pushAuditProbe.stderr.slice(0, 1000)
+  );
+
+  const pushChangeRepoRoot = path.join(fakeLspRoot, 'push-change-repo');
+  fs.cpSync(fixtureRepoRoot, pushChangeRepoRoot, { recursive: true });
+  const pushChangeTracePath = path.join(fakeLspRoot, 'push-change-trace.jsonl');
+  const pushChangeManager = new LspSessionManager({
+    env: {
+      ...fakeLspEnv,
+      CODE_INTEL_LSP_TRACE_FILE: pushChangeTracePath,
+      CODE_INTEL_FAKE_PUSH_DIAGNOSTICS: '1',
+      CODE_INTEL_FAKE_PULL_DIAGNOSTICS: 'unsupported',
+      CODE_INTEL_FAKE_PUSH_DIAGNOSTICS_EMPTY_ON_CHANGE: '1'
+    }
+  });
+  const pushChangeArgs = {
+    repoRoot: pushChangeRepoRoot,
+    file: fixtureFile,
+    settingsPathExtraDirs: [fakeBinDir],
+    timeoutMs: 5000
+  };
+  const pushBeforeChange = await pushChangeManager.diagnosticsForFile(
+    'fake-no-version-lsp --stdio',
+    { language: 'typescript' },
+    pushChangeArgs
+  );
+  fs.appendFileSync(
+    path.join(pushChangeRepoRoot, fixtureFile),
+    '\nexport const diagnosticsCleared = true;\n'
+  );
+  const pushAfterChange = await pushChangeManager.diagnosticsForFile(
+    'fake-no-version-lsp --stdio',
+    { language: 'typescript' },
+    pushChangeArgs
+  );
+  await pushChangeManager.shutdownAll();
+  check(
+    'push diagnostics empty notification clears findings for the current version',
+    pushBeforeChange.transport === 'push' &&
+      pushBeforeChange.documentVersion === 1 &&
+      pushBeforeChange.response?.result?.items?.length === 1 &&
+      pushAfterChange.transport === 'push' &&
+      pushAfterChange.documentVersion === 2 &&
+      pushAfterChange.response?.result?.items?.length === 0 &&
+      pushAfterChange.stale === false,
+    JSON.stringify({ pushBeforeChange, pushAfterChange })
+  );
+
+  const stalePushTracePath = path.join(fakeLspRoot, 'stale-push-trace.jsonl');
+  const stalePushProbe = run(process.execPath, ['mcp/code-intel-server/index.js'], {
+    env: {
+      ...fakeLspEnv,
+      CODE_INTEL_LSP_TRACE_FILE: stalePushTracePath,
+      CODE_INTEL_FAKE_PUSH_DIAGNOSTICS: '1',
+      CODE_INTEL_FAKE_PULL_DIAGNOSTICS: 'unsupported',
+      CODE_INTEL_FAKE_PUSH_DIAGNOSTICS_VERSION_OFFSET: '-1'
+    },
+    input: Buffer.concat([
+      initializeFrame(),
+      mcpFrame({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: {
+          name: 'lsp_diagnostics',
+          arguments: {
+            repoRoot: fixtureRepoRoot,
+            file: fixtureFile,
+            timeoutMs: 5000,
+            diagnosticSettleMs: 25
+          }
+        }
+      })
+    ])
+  });
+  const stalePushOutput = parseProtocolFrames(stalePushProbe.stdout)
+    .find((message) => message.id === 2)?.result?.structuredContent;
+  check(
+    'diagnostics broker rejects stale push diagnostics',
+    stalePushProbe.status === 0 &&
+      stalePushOutput?.status === 'unavailable' &&
+      stalePushOutput.transport === 'push' &&
+      stalePushOutput.documentVersion === 1 &&
+      stalePushOutput.stale === true &&
+      /timed out waiting for push diagnostics/.test(stalePushOutput.fallbackReason || ''),
+    stalePushProbe.stdout.slice(0, 1000) || stalePushProbe.stderr.slice(0, 1000)
+  );
+
+  const missingPushTracePath = path.join(fakeLspRoot, 'missing-push-trace.jsonl');
+  const missingPushProbe = run(process.execPath, ['mcp/code-intel-server/index.js'], {
+    env: {
+      ...fakeLspEnv,
+      CODE_INTEL_LSP_TRACE_FILE: missingPushTracePath,
+      CODE_INTEL_FAKE_PULL_DIAGNOSTICS: 'unsupported'
+    },
+    input: Buffer.concat([
+      initializeFrame(),
+      mcpFrame({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: {
+          name: 'lsp_diagnostics',
+          arguments: {
+            repoRoot: fixtureRepoRoot,
+            file: fixtureFile,
+            timeoutMs: 5000,
+            diagnosticSettleMs: 25
+          }
+        }
+      })
+    ])
+  });
+  const missingPushOutput = parseProtocolFrames(missingPushProbe.stdout)
+    .find((message) => message.id === 2)?.result?.structuredContent;
+  check(
+    'diagnostics broker reports a clear push timeout when no notification arrives',
+    missingPushProbe.status === 0 &&
+      missingPushOutput?.status === 'unavailable' &&
+      missingPushOutput.transport === 'push' &&
+      missingPushOutput.documentVersion === 1 &&
+      missingPushOutput.stale === false &&
+      /timed out waiting for push diagnostics/.test(missingPushOutput.fallbackReason || ''),
+    missingPushProbe.stdout.slice(0, 1000) || missingPushProbe.stderr.slice(0, 1000)
   );
 } catch (error) {
   check('LSP fixture oracle suite executes', false, error.stack || error.message);

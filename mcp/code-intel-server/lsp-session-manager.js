@@ -16,6 +16,7 @@ import {
   lspUnavailable,
   readLspMessagesFromBuffer
 } from './lsp.js';
+import { LspDiagnosticsBroker } from './lsp-diagnostics.js';
 import { resolveRepoRelativeFile } from './repo.js';
 import { PLUGIN_VERSION, splitCommandLine } from './settings.js';
 
@@ -76,6 +77,7 @@ class LspSession {
     this.stderr = Buffer.alloc(0);
     this.pending = new Map();
     this.notifications = [];
+    this.diagnostics = new LspDiagnosticsBroker();
     this.openDocuments = new Map();
     this.nextRequestId = 1;
     this.initializeResult = null;
@@ -146,6 +148,9 @@ class LspSession {
         pending.resolve(message);
         this.touch();
       } else if (message.method) {
+        if (message.method === 'textDocument/publishDiagnostics') {
+          this.diagnostics.publish(message.params);
+        }
         this.notifications.push(message);
         if (this.notifications.length > MAX_NOTIFICATIONS) {
           this.notifications.shift();
@@ -218,6 +223,57 @@ class LspSession {
     return { response, documentVersion };
   }
 
+  async diagnosticsForFile(filePath, args) {
+    const uri = pathToFileURL(filePath).href;
+    const text = fs.readFileSync(filePath, 'utf8');
+    const documentVersion = this.ensureDocument(uri, text, this.descriptor.language);
+    if (this.initializeResult?.capabilities?.diagnosticProvider) {
+      const response = await this.sendRequest(
+        'textDocument/diagnostic',
+        lspParams('textDocument/diagnostic', uri, args),
+        args.timeoutMs || 10000
+      );
+      return {
+        response,
+        documentVersion,
+        transport: 'pull',
+        collectedAt: new Date().toISOString(),
+        stale: false
+      };
+    }
+    const settleMs = Math.min(
+      args.timeoutMs || 10000,
+      args.diagnosticSettleMs ?? 750
+    );
+    clearTimeout(this.idleTimer);
+    const published = await this.diagnostics.waitFor(uri, documentVersion, settleMs);
+    this.touch();
+    if (!published) {
+      const latest = this.diagnostics.latest(uri);
+      return {
+        response: null,
+        documentVersion,
+        transport: 'push',
+        collectedAt: latest?.collectedAt || null,
+        stale: Boolean(
+          latest &&
+          latest.version !== null &&
+          latest.version < documentVersion
+        ),
+        diagnosticsTimedOut: true
+      };
+    }
+    return {
+      response: {
+        result: { kind: 'full', items: published.diagnostics }
+      },
+      documentVersion,
+      transport: 'push',
+      collectedAt: published.collectedAt,
+      stale: published.version !== null && published.version < documentVersion
+    };
+  }
+
   touch() {
     if (!this.manager.idleTimeoutMs || this.closed || this.closing) return;
     clearTimeout(this.idleTimer);
@@ -237,6 +293,7 @@ class LspSession {
       pending.reject(error);
     }
     this.pending.clear();
+    this.diagnostics.abort(error);
     this.manager.remove(this);
   }
 
@@ -265,8 +322,10 @@ class LspSession {
       try {
         this.send({ jsonrpc: '2.0', method: 'textDocument/didClose', params: { textDocument: { uri } } });
       } catch {}
+      this.diagnostics.clear(uri);
     }
     this.openDocuments.clear();
+    this.diagnostics.clearAll();
     try {
       await this.sendRequest('shutdown', null, timeoutMs);
       this.send({ jsonrpc: '2.0', method: 'exit', params: null });
@@ -330,7 +389,7 @@ export class LspSessionManager {
     }
   }
 
-  async request(commandLine, languageRuntime, method, args) {
+  async run(commandLine, languageRuntime, args, operation) {
     const resolved = resolveRepoRelativeFile(args.repoRoot || process.cwd(), args.file);
     if (!resolved.ok) {
       throw new LspSessionError(resolved.reason);
@@ -345,7 +404,7 @@ export class LspSessionManager {
       try {
         const acquired = await this.getSession(descriptor, args.timeoutMs || 10000);
         session = acquired.session;
-        const result = await session.requestForFile(method, resolved.filePath, args);
+        const result = await operation(session, resolved.filePath);
         return {
           ...result,
           initializeResult: session.initializeResult,
@@ -365,6 +424,24 @@ export class LspSessionManager {
     throw new LspSessionError('LSP request failed after restart');
   }
 
+  request(commandLine, languageRuntime, method, args) {
+    return this.run(
+      commandLine,
+      languageRuntime,
+      args,
+      (session, filePath) => session.requestForFile(method, filePath, args)
+    );
+  }
+
+  diagnosticsForFile(commandLine, languageRuntime, args) {
+    return this.run(
+      commandLine,
+      languageRuntime,
+      args,
+      (session, filePath) => session.diagnosticsForFile(filePath, args)
+    );
+  }
+
   async closeIdleSession(session) {
     if (this.sessions.get(session.descriptor.key) !== session) return;
     await session.close();
@@ -382,11 +459,29 @@ export async function lspToolWithSession(manager, method, args = {}) {
   const languageRuntime = { language, ...config };
   if (!command) return lspUnavailable(method, { ...args, language }, 'LSP command missing', { settings });
   try {
-    const result = await manager.request(command, languageRuntime, method, {
+    const requestArgs = {
       ...args,
       settings: { astGrep: settings.astGrep, path: settings.path },
       settingsPathExtraDirs: settings.path.extraDirs
-    });
+    };
+    const result = method === 'textDocument/diagnostic'
+      ? await manager.diagnosticsForFile(command, languageRuntime, requestArgs)
+      : await manager.request(command, languageRuntime, method, requestArgs);
+    if (result.diagnosticsTimedOut) {
+      return lspUnavailable(
+        method,
+        { ...args, language },
+        'timed out waiting for push diagnostics',
+        {
+          command,
+          transport: result.transport,
+          documentVersion: result.documentVersion,
+          collectedAt: result.collectedAt,
+          stale: result.stale,
+          settings
+        }
+      );
+    }
     if (result.response?.error) {
       return {
         status: 'error',
@@ -398,7 +493,11 @@ export async function lspToolWithSession(manager, method, args = {}) {
         fallbackUsed: runtimeFallbackUsed(config, settings, args.repoRoot || process.cwd()),
         fallbackReason: 'LSP server returned an error',
         sessionReused: result.sessionReused,
-        restarted: result.restarted
+        restarted: result.restarted,
+        transport: result.transport,
+        documentVersion: result.documentVersion,
+        collectedAt: result.collectedAt,
+        stale: result.stale
       };
     }
     if (result.response && Object.prototype.hasOwnProperty.call(result.response, 'result')) {
@@ -415,6 +514,9 @@ export async function lspToolWithSession(manager, method, args = {}) {
         documentVersion: result.documentVersion,
         sessionReused: result.sessionReused,
         restarted: result.restarted,
+        transport: result.transport,
+        collectedAt: result.collectedAt,
+        stale: result.stale,
         previewOnly: method === 'textDocument/rename' ? true : undefined,
         mutated: method === 'textDocument/rename' ? false : undefined,
         degradedCapability: null,
@@ -465,6 +567,10 @@ export async function lspDiagnosticsForFileWithSession(manager, repoRoot, file, 
     result: result.result || null,
     fallbackUsed: result.fallbackUsed || null,
     fallbackReason: result.fallbackReason || null,
-    stderrSummary: result.stderrSummary || ''
+    stderrSummary: result.stderrSummary || '',
+    transport: result.transport || null,
+    documentVersion: result.documentVersion || null,
+    collectedAt: result.collectedAt || null,
+    stale: result.stale ?? null
   };
 }

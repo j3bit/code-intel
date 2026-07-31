@@ -45,7 +45,12 @@
   repository/initialization options 격리, idle/MCP 종료 cleanup, crash 후
   1회 재시작을 검증한다. `post_edit_audit`도 저장소 안의 여러 파일에서 같은
   session을 사용한다.
-- 현재 사용자 설정을 포함한 기본 validation은 201/201 통과한다.
+- 2026-07-31: P0-3 완료. initialize의 `diagnosticProvider`에 따라 pull
+  request와 push notification cache를 선택하고, 결과에 transport,
+  document version, 수집 시각, stale 여부를 포함한다.
+- push clear notification, 이전 version 거부, notification timeout,
+  `post_edit_audit` provenance를 fixture로 검증한다.
+- 현재 사용자 설정을 포함한 기본 validation은 210/210 통과한다.
 
 ### 사용자 언어 도구
 
