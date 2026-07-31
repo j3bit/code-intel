@@ -26,3 +26,13 @@ legacy `capabilities` is treated as the same expectation for compatibility.
 Executable discovery proves only that a candidate can be started. Runtime reports
 separate expected, initialize-advertised, method-verified, and method-unsupported
 capabilities.
+
+Language routing supports `filenames`, `globs`, `extensions`, and interpreter
+names in `shebangs`. The default match priority is exact filename, glob,
+extension, then shebang. Numeric `precedence` is evaluated before that match
+priority; ties are resolved by language id so JSON object insertion order never
+decides the route. Discovery reports the selected matcher and reason.
+
+Per-language AST availability requires a parse smoke against a representative
+repository file. Finding the ast-grep executable alone does not prove that a
+custom grammar can load.

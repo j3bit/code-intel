@@ -10,6 +10,7 @@ import {
   loadSettings,
   validateSettings,
   splitCommandLine,
+  languageMatchForFile,
   lspDiagnosticsForFile,
   postEditAudit,
   LspSessionManager,
@@ -701,6 +702,220 @@ printf '%s\n' '[{"file":"extra.py","text":"fake relative match","language":"Pyth
   check('ast-grep search executes relative extraDirs command from repoRoot', false, error.message);
 } finally {
   fs.rmSync(relativeExtraPathAstRoot, { recursive: true, force: true });
+}
+const languageRoutingRoot = fs.mkdtempSync(
+  path.join(os.tmpdir(), 'code-intel-language-routing-')
+);
+try {
+  const routingBinDir = path.join(languageRoutingRoot, 'bin');
+  const scriptsDir = path.join(languageRoutingRoot, 'scripts');
+  fs.mkdirSync(routingBinDir, { recursive: true });
+  fs.mkdirSync(scriptsDir, { recursive: true });
+  const routingAstGrep = path.join(routingBinDir, 'ast-grep');
+  fs.writeFileSync(routingAstGrep, `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "ast-grep routing-fixture"
+  exit 0
+fi
+for arg in "$@"; do
+  if [ "$arg" = "broken" ]; then
+    echo "failed to load custom language library: incompatible ABI" >&2
+    exit 9
+  fi
+done
+echo "[]"
+`);
+  fs.chmodSync(routingAstGrep, 0o755);
+  fs.writeFileSync(path.join(languageRoutingRoot, '.zshrc'), 'autoload -Uz compinit\n');
+  fs.writeFileSync(path.join(languageRoutingRoot, '.bashrc'), 'set -o pipefail\n');
+  fs.writeFileSync(
+    path.join(languageRoutingRoot, 'run-bash'),
+    '#!/usr/bin/env bash\nset -eu\n'
+  );
+  fs.chmodSync(path.join(languageRoutingRoot, 'run-bash'), 0o755);
+  fs.writeFileSync(path.join(languageRoutingRoot, 'shared.sh'), 'echo shared\n');
+  fs.writeFileSync(path.join(scriptsDir, 'task.sh'), 'echo task\n');
+  fs.writeFileSync(path.join(languageRoutingRoot, 'bad.broken'), 'broken syntax\n');
+  const languageRoutingSettingsPath = path.join(
+    languageRoutingRoot,
+    'settings.json'
+  );
+  writeJson(languageRoutingSettingsPath, {
+    version: 1,
+    path: { extraDirs: [routingBinDir] },
+    astGrep: { command: 'ast-grep', configPath: null },
+    fallback: ['rg', 'grep'],
+    languages: {
+      bash: {
+        extensions: ['.sh'],
+        filenames: ['.bashrc'],
+        globs: ['scripts/*.sh'],
+        shebangs: ['bash'],
+        precedence: 10,
+        astGrep: { languageId: 'bash' },
+        lsp: { commands: [], expectedCapabilities: [] }
+      },
+      zsh: {
+        extensions: ['.sh'],
+        filenames: ['.zshrc'],
+        globs: ['**/*.zsh'],
+        shebangs: ['zsh'],
+        precedence: 20,
+        astGrep: { languageId: 'zsh' },
+        lsp: { commands: [], expectedCapabilities: [] }
+      },
+      broken: {
+        extensions: ['.broken'],
+        precedence: 30,
+        astGrep: { languageId: 'broken' },
+        lsp: { commands: [], expectedCapabilities: [] }
+      }
+    }
+  });
+  const languageRoutingSettings = loadSettings(languageRoutingRoot, {
+    defaultSettingsPath: languageRoutingSettingsPath,
+    userSettingsPath: path.join(languageRoutingRoot, 'missing-user-settings.json'),
+    projectSettingsPath: path.join(languageRoutingRoot, 'missing-project-settings.json')
+  });
+  const zshrcMatch = languageMatchForFile(
+    path.join(languageRoutingRoot, '.zshrc'),
+    languageRoutingSettings
+  );
+  const bashrcMatch = languageMatchForFile(
+    path.join(languageRoutingRoot, '.bashrc'),
+    languageRoutingSettings
+  );
+  const shebangMatch = languageMatchForFile(
+    path.join(languageRoutingRoot, 'run-bash'),
+    languageRoutingSettings
+  );
+  const conflictMatch = languageMatchForFile(
+    path.join(languageRoutingRoot, 'shared.sh'),
+    languageRoutingSettings
+  );
+  const globMatch = languageMatchForFile(
+    path.join(scriptsDir, 'task.sh'),
+    languageRoutingSettings
+  );
+  check(
+    'language routing handles exact filenames globs and shebangs',
+    zshrcMatch.language === 'zsh' &&
+      zshrcMatch.matcher === 'filename' &&
+      bashrcMatch.language === 'bash' &&
+      bashrcMatch.matcher === 'filename' &&
+      shebangMatch.language === 'bash' &&
+      shebangMatch.matcher === 'shebang' &&
+      globMatch.candidates.some((candidate) =>
+        candidate.language === 'bash' && candidate.matcher === 'glob'
+      ),
+    JSON.stringify({
+      zshrcMatch,
+      bashrcMatch,
+      shebangMatch,
+      globMatch
+    })
+  );
+  check(
+    'language routing resolves extension conflicts by explicit precedence',
+    conflictMatch.language === 'zsh' &&
+      conflictMatch.matcher === 'extension' &&
+      conflictMatch.precedence === 20 &&
+      conflictMatch.candidates[1]?.language === 'bash' &&
+      conflictMatch.reason.includes('precedence 20'),
+    JSON.stringify(conflictMatch)
+  );
+  const languageRoutingEnv = {
+    ...isolatedSettingsEnv(languageRoutingRoot),
+    PATH: `${routingBinDir}${path.delimiter}${process.env.PATH || ''}`,
+    CODE_INTEL_DEFAULT_SETTINGS_PATH: languageRoutingSettingsPath
+  };
+  const languageRoutingDiscoveryProbe = runToolProbe(
+    'capability_discover',
+    { repoRoot: languageRoutingRoot },
+    languageRoutingEnv
+  );
+  const languageRoutingDiscovery = languageRoutingDiscoveryProbe.output;
+  const languageRoutingRouteProbe = runToolProbe(
+    'capability_route',
+    {
+      repoRoot: languageRoutingRoot,
+      file: 'shared.sh',
+      intent: 'structural'
+    },
+    languageRoutingEnv
+  );
+  check(
+    'capability route reports the selected language matcher and precedence',
+    languageRoutingRouteProbe.output.language === 'zsh' &&
+      languageRoutingRouteProbe.output.languageMatch?.matcher === 'extension' &&
+      languageRoutingRouteProbe.output.languageMatch?.precedence === 20 &&
+      languageRoutingRouteProbe.output.languageMatch?.reason?.includes('precedence 20'),
+    languageRoutingRouteProbe.processResult.stdout.slice(0, 2000) ||
+      languageRoutingRouteProbe.processResult.stderr.slice(0, 1000)
+  );
+  check(
+    'capability discovery reports routing evidence for shell dotfiles',
+    languageRoutingDiscovery.status === 'ok' &&
+      languageRoutingDiscovery.languages?.zsh?.routeEvidence?.some((evidence) =>
+        evidence.file === '.zshrc' && evidence.matcher === 'filename'
+      ) &&
+      languageRoutingDiscovery.languages?.bash?.routeEvidence?.some((evidence) =>
+        evidence.file === 'run-bash' && evidence.matcher === 'shebang'
+      ),
+    languageRoutingDiscoveryProbe.processResult.stdout.slice(0, 2500) ||
+      languageRoutingDiscoveryProbe.processResult.stderr.slice(0, 1000)
+  );
+  check(
+    'AST capability requires a successful per-language parse smoke',
+    languageRoutingDiscovery.languages?.bash?.astGrep === 'available' &&
+      languageRoutingDiscovery.languages?.bash?.astGrepProbe?.status === 'passed' &&
+      languageRoutingDiscovery.languages?.broken?.astGrep === 'unavailable' &&
+      languageRoutingDiscovery.languages?.broken?.astGrepProbe?.status === 'failed' &&
+      /incompatible ABI/.test(
+        languageRoutingDiscovery.languages?.broken?.astGrepProbe?.stderrSummary || ''
+      ),
+    JSON.stringify(languageRoutingDiscovery.languages)
+  );
+  const languageRoutingInit = run(
+    'node',
+    ['scripts/init-code-intel.js', '--repo', languageRoutingRoot, '--json'],
+    { env: languageRoutingEnv }
+  );
+  const languageRoutingProfile = readJson(
+    path.relative(
+      ROOT,
+      path.join(languageRoutingRoot, 'docs/code-intel/routing-profile.json')
+    )
+  );
+  check(
+    'init records failed custom grammar probes instead of availability',
+    languageRoutingInit.status === 0 &&
+      languageRoutingProfile.languages?.broken?.astGrep === 'unavailable' &&
+      languageRoutingProfile.languages?.broken?.astGrepSmoke?.status === 'failed',
+    languageRoutingInit.stdout.slice(0, 1500) ||
+      languageRoutingInit.stderr.slice(0, 1500)
+  );
+  const languageRoutingDoctor = run(
+    'node',
+    ['scripts/doctor-code-intel.js', '--repo', languageRoutingRoot, '--json'],
+    { env: languageRoutingEnv }
+  );
+  const languageRoutingDoctorReport = JSON.parse(
+    languageRoutingDoctor.stdout || '{}'
+  );
+  check(
+    'doctor reports a failed custom grammar probe with text fallback',
+    languageRoutingDoctor.status === 0 &&
+      languageRoutingDoctorReport.findings?.some((finding) =>
+        finding.capability === 'broken AST' &&
+        /incompatible ABI/.test(finding.reason) &&
+        sameJson(finding.fallback, ['rg', 'grep'])
+      ),
+    languageRoutingDoctor.stdout.slice(0, 2500) ||
+      languageRoutingDoctor.stderr.slice(0, 1000)
+  );
+} finally {
+  fs.rmSync(languageRoutingRoot, { recursive: true, force: true });
 }
 const fakeLspRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-fake-lsp-'));
 try {

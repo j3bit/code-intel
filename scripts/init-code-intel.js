@@ -40,6 +40,7 @@ function comparableInventory(repoRoot, inventory) {
 }
 
 function astGrepSmoke(repoRoot, language, info, discovery) {
+  if (info.astGrepProbe) return info.astGrepProbe;
   if (info.astGrep !== 'available') return { status: 'skipped', reason: 'ast-grep unavailable or language unsupported' };
   const example = discovery.inventory.languages[language]?.examples?.[0];
   if (!example) return { status: 'skipped', reason: 'no sample file detected for language' };
@@ -54,7 +55,7 @@ function astGrepSmoke(repoRoot, language, info, discovery) {
     maxBuffer: 1024 * 1024
   });
   const base = { file: example, languageId: info.astGrepLanguageId, executable: discovery.tools.astGrep.command, resolvedCommand: discovery.tools.astGrep.resolvedCommand || null, configPath: discovery.tools.astGrep.configPath || null };
-  if (result.status === 0 || result.stdout) return { status: 'passed', ...base };
+  if (result.status === 0) return { status: 'passed', ...base };
   return { status: 'failed', ...base, stderrSummary: (result.stderr || result.error?.message || '').trim().slice(0, 300) };
 }
 
@@ -133,7 +134,7 @@ const profile = {
   settingsVersion: discovery.settingsVersion,
   settingsSources: discovery.settingsSources,
   tools: discovery.tools,
-  languages: Object.fromEntries(Object.entries(discovery.languages).filter(([, v]) => v.presentFiles > 0).map(([k, v]) => [k, { astGrep: v.astGrep, astGrepLanguageId: v.astGrepLanguageId, astGrepSmoke: v.astGrepSmoke, lsp: v.lsp, lspState: v.lspState, lspCommand: v.lspCommand, lspInitializeSmoke: v.lspInitializeSmoke, expectedCapabilities: v.expectedCapabilities, advertisedCapabilities: v.lspInitializeSmoke?.advertisedCapabilities || [], verifiedCapabilities: v.lspInitializeSmoke?.verifiedCapabilities || [], unsupportedCapabilities: v.lspInitializeSmoke?.unsupportedCapabilities || [], methodVerified: v.lspInitializeSmoke?.status === 'passed' ? ['documentSymbol'] : [], fallback: v.fallback, files: v.presentFiles }])),
+  languages: Object.fromEntries(Object.entries(discovery.languages).filter(([, v]) => v.presentFiles > 0).map(([k, v]) => [k, { extensions: v.extensions, filenames: v.filenames, globs: v.globs, shebangs: v.shebangs, precedence: v.precedence, routeEvidence: v.routeEvidence, astGrep: v.astGrep, astGrepLanguageId: v.astGrepLanguageId, astGrepSmoke: v.astGrepSmoke, lsp: v.lsp, lspState: v.lspState, lspCommand: v.lspCommand, lspInitializeSmoke: v.lspInitializeSmoke, expectedCapabilities: v.expectedCapabilities, advertisedCapabilities: v.lspInitializeSmoke?.advertisedCapabilities || [], verifiedCapabilities: v.lspInitializeSmoke?.verifiedCapabilities || [], unsupportedCapabilities: v.lspInitializeSmoke?.unsupportedCapabilities || [], methodVerified: v.lspInitializeSmoke?.status === 'passed' ? ['documentSymbol'] : [], fallback: v.fallback, files: v.presentFiles }])),
   inventory: comparableInventory(repoRoot, discovery.inventory),
   staleRules: ['repo root differs', 'settings version differs', 'settings source differs', 'plugin version differs', 'profile timestamp predates material plugin upgrade', 'language inventory major mismatch'],
   commandPolicy: 'this plugin does not call sg'

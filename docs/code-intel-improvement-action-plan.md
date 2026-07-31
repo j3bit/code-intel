@@ -61,7 +61,13 @@
 - 실행 실패 시 다음 LSP candidate로 넘어가며, 결과와 doctor가 expected,
   advertised, verified, unsupported capability 및 candidate failure를
   구분해 보고한다.
-- 현재 사용자 설정을 포함한 기본 validation은 219/219 통과한다.
+- 2026-07-31: P1-3 완료. exact filename, glob, extension, shebang 판별과
+  언어별 precedence를 추가하고, 선택 matcher와 충돌 후보를 route/init
+  report에 기록한다.
+- 언어별 대표 파일을 실제 ast-grep language ID로 parse-smoke해 custom
+  grammar load 실패를 unavailable로 낮추고 doctor에 원인과 fallback을
+  표시한다.
+- 현재 사용자 설정을 포함한 기본 validation은 226/226 통과한다.
 
 ### 사용자 언어 도구
 

@@ -89,6 +89,14 @@ const languageRuntimes = {};
 if (!discovery.tools.astGrep.available) findings.push({ severity: 'degraded', capability: 'AST search', reason: 'ast-grep executable was not found on PATH', fallback: ['rg', 'grep'] });
 for (const [language, info] of Object.entries(discovery.languages)) {
   if (!info.presentFiles) continue;
+  if (info.astGrepProbe?.status === 'failed') {
+    findings.push({
+      severity: 'degraded',
+      capability: `${language} AST`,
+      reason: info.astGrepProbe.stderrSummary || 'ast-grep language parse smoke failed',
+      fallback: ['rg', 'grep']
+    });
+  }
   if (info.lsp === 'missing') findings.push({ severity: 'degraded', capability: `${language} LSP`, reason: 'LSP command missing', fallback: info.astGrep === 'available' ? ['ast-grep', 'rg', 'grep'] : ['rg', 'grep'] });
   else if (info.lsp === 'commandDetected') {
     const file = discovery.inventory.languages[language]?.examples?.[0];

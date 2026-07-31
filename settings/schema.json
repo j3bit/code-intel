@@ -29,9 +29,13 @@
       "additionalProperties": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["extensions", "astGrep", "lsp"],
+        "required": ["astGrep", "lsp"],
         "properties": {
-          "extensions": { "type": "array", "items": { "type": "string", "pattern": "^\\." }, "minItems": 1 },
+          "extensions": { "type": "array", "items": { "type": "string", "pattern": "^\\." } },
+          "filenames": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "globs": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "shebangs": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "precedence": { "type": "number" },
           "astGrep": {
             "type": "object",
             "additionalProperties": false,
