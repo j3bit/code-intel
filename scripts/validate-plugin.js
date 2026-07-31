@@ -333,7 +333,163 @@ try {
 } finally {
   fs.rmSync(settingsHomeFallbackRoot, { recursive: true, force: true });
 }
-check('scripts executable or documented', ['scripts/init-code-intel.js','scripts/doctor-code-intel.js','scripts/validate-plugin.js'].every((f) => fs.statSync(path.join(ROOT, f)).mode & 0o111), 'init/doctor/validate executable');
+check(
+  'scripts executable or documented',
+  [
+    'scripts/init-code-intel.js',
+    'scripts/doctor-code-intel.js',
+    'scripts/validate-plugin.js',
+    'scripts/run-integration-matrix.js'
+  ].every((file) => fs.statSync(path.join(ROOT, file)).mode & 0o111),
+  'init/doctor/validate/integration executable'
+);
+
+check('real-server integration matrix exists', exists('integrations/real-server-matrix.json'), 'integrations/real-server-matrix.json');
+check('integration corpus provenance exists', exists('integrations/corpus/README.md'), 'integrations/corpus/README.md');
+const integrationMatrix = readJson('integrations/real-server-matrix.json');
+const missingIntegrationCorpus = integrationMatrix.entries
+  .map((entry) => entry.file)
+  .filter((file) => !exists(file));
+check(
+  'real-server matrix corpus files exist',
+  missingIntegrationCorpus.length === 0,
+  missingIntegrationCorpus.join(', ') || `${integrationMatrix.entries.length} entries`
+);
+const invalidPublicCorpus = integrationMatrix.entries
+  .filter((entry) => entry.corpus?.kind === 'public')
+  .filter((entry) =>
+    !entry.corpus.repository ||
+    !entry.corpus.revision ||
+    !entry.corpus.sourcePath ||
+    !entry.corpus.license ||
+    !entry.corpus.licenseFile ||
+    !exists(entry.corpus.licenseFile)
+  )
+  .map((entry) => entry.id);
+check(
+  'public integration corpus is revision-pinned and licensed',
+  invalidPublicCorpus.length === 0,
+  invalidPublicCorpus.join(', ') || 'all public corpus entries have provenance and license files'
+);
+check(
+  'package exposes opt-in real-server integration command',
+  readJson('package.json').scripts?.['integration:real'] === 'node scripts/run-integration-matrix.js',
+  readJson('package.json').scripts?.['integration:real'] || '(missing)'
+);
+
+const integrationFixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-real-integration-'));
+try {
+  const fixtureRepoRoot = path.join(ROOT, 'fixtures/repos/typescript-basic');
+  const fakeServer = path.join(ROOT, 'fixtures/lsp/fake-lsp-server.js');
+  const missingMatrixPath = path.join(integrationFixtureRoot, 'missing.json');
+  const missingReportPath = path.join(integrationFixtureRoot, 'missing-report.json');
+  writeJson(missingMatrixPath, {
+    version: 1,
+    repoRoot: fixtureRepoRoot,
+    entries: [{
+      id: 'missing-server',
+      language: 'typescript',
+      command: 'code-intel-definitely-missing-lsp',
+      file: 'src/math.ts',
+      methods: []
+    }]
+  });
+  const missingRun = run(process.execPath, [
+    'scripts/run-integration-matrix.js',
+    '--matrix', missingMatrixPath,
+    '--output', missingReportPath
+  ]);
+  const missingReport = fs.existsSync(missingReportPath) ? JSON.parse(fs.readFileSync(missingReportPath, 'utf8')) : {};
+  check(
+    'real-server matrix skips missing executables explicitly',
+    missingRun.status === 0 &&
+      missingReport.summary?.skipped === 1 &&
+      missingReport.entries?.[0]?.status === 'skipped' &&
+      Boolean(missingReport.entries?.[0]?.skipReason),
+    missingRun.stderr || JSON.stringify(missingReport)
+  );
+
+  const passingMatrixPath = path.join(integrationFixtureRoot, 'passing.json');
+  const passingReportPath = path.join(integrationFixtureRoot, 'passing-report.json');
+  writeJson(passingMatrixPath, {
+    version: 1,
+    repoRoot: fixtureRepoRoot,
+    entries: [{
+      id: 'fake-symbols',
+      language: 'typescript',
+      languageId: 'typescript',
+      command: process.execPath,
+      args: [fakeServer],
+      versionArgs: ['--version'],
+      env: { CODE_INTEL_FAKE_LATE_SERVER_REQUEST_ON_EXIT: '1' },
+      file: 'src/math.ts',
+      corpus: { kind: 'local', path: 'src/math.ts' },
+      expectedCapabilities: ['symbols'],
+      methods: [{
+        name: 'symbols',
+        method: 'textDocument/documentSymbol',
+        requireAdvertisedCapability: true,
+        expect: { resultShape: 'array', minItems: 1 }
+      }]
+    }]
+  });
+  const passingRun = run(process.execPath, [
+    'scripts/run-integration-matrix.js',
+    '--matrix', passingMatrixPath,
+    '--output', passingReportPath
+  ]);
+  const passingReport = fs.existsSync(passingReportPath) ? JSON.parse(fs.readFileSync(passingReportPath, 'utf8')) : {};
+  const passingEntry = passingReport.entries?.[0] || {};
+  check(
+    'real-server matrix records installed server evidence',
+    passingRun.status === 0 &&
+      passingEntry.status === 'passed' &&
+      path.isAbsolute(passingEntry.executablePath || '') &&
+      Boolean(passingEntry.version) &&
+      passingEntry.methods?.[0]?.passed === true &&
+      passingEntry.methods?.[0]?.itemCount >= 1,
+    passingRun.stderr || JSON.stringify(passingEntry)
+  );
+
+  const failingMatrixPath = path.join(integrationFixtureRoot, 'failing.json');
+  const failingReportPath = path.join(integrationFixtureRoot, 'failing-report.json');
+  writeJson(failingMatrixPath, {
+    version: 1,
+    repoRoot: fixtureRepoRoot,
+    entries: [{
+      id: 'fake-hover-regression',
+      language: 'typescript',
+      languageId: 'typescript',
+      command: process.execPath,
+      args: [fakeServer],
+      env: { CODE_INTEL_FAKE_DISABLED_CAPABILITIES: 'hover' },
+      file: 'src/math.ts',
+      expectedCapabilities: ['hover'],
+      methods: [{
+        name: 'hover',
+        method: 'textDocument/hover',
+        requireAdvertisedCapability: true,
+        expect: { resultShape: 'object' }
+      }]
+    }]
+  });
+  const failingRun = run(process.execPath, [
+    'scripts/run-integration-matrix.js',
+    '--matrix', failingMatrixPath,
+    '--output', failingReportPath
+  ]);
+  const failingReport = fs.existsSync(failingReportPath) ? JSON.parse(fs.readFileSync(failingReportPath, 'utf8')) : {};
+  check(
+    'real-server matrix fails installed-server protocol regressions',
+    failingRun.status !== 0 &&
+      failingReport.status === 'failed' &&
+      failingReport.entries?.[0]?.status === 'failed' &&
+      failingReport.entries?.[0]?.methods?.[0]?.passed === false,
+    failingRun.stderr || JSON.stringify(failingReport)
+  );
+} finally {
+  fs.rmSync(integrationFixtureRoot, { recursive: true, force: true });
+}
 
 // MCP contract validation
 const list = run('node', ['mcp/code-intel-server/index.js', '--list-tools']);

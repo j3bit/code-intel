@@ -3,6 +3,7 @@
 
 # Dependency/install artifacts
 node_modules/
+artifacts/code-intel-integration-matrix.json
 
 # Logs and debug output
 *.log

@@ -193,7 +193,15 @@ class LspSession {
         pending.resolve(message);
         this.touch();
       } else if (message.id !== undefined && message.method) {
-        this.handleServerRequest(message);
+        try {
+          this.handleServerRequest(message);
+        } catch (error) {
+          if (!this.closing && !this.closed) {
+            this.fail(error instanceof LspSessionError
+              ? error
+              : new LspSessionError(error.message, { retryable: true }));
+          }
+        }
       } else if (message.method) {
         if (message.method === 'textDocument/publishDiagnostics') {
           this.diagnostics.publish(message.params);

@@ -1,0 +1,142 @@
+{
+  "version": 1,
+  "repoRoot": "..",
+  "entries": [
+    {
+      "id": "shuck-bash",
+      "language": "bash",
+      "languageId": "bash",
+      "command": "shuck",
+      "args": ["server"],
+      "versionArgs": ["--version"],
+      "file": "integrations/corpus/bash/sample.sh",
+      "corpus": { "kind": "local", "path": "integrations/corpus/bash/sample.sh" },
+      "expectedCapabilities": ["symbols", "diagnostics"],
+      "methods": [
+        { "name": "symbols", "method": "textDocument/documentSymbol", "expect": { "resultShape": "array", "minItems": 1 } },
+        { "name": "diagnostics", "method": "textDocument/diagnostic", "expect": { "resultShape": "object" } }
+      ]
+    },
+    {
+      "id": "shuck-zsh",
+      "language": "zsh",
+      "languageId": "zsh",
+      "command": "shuck",
+      "args": ["server"],
+      "versionArgs": ["--version"],
+      "file": "integrations/corpus/zsh/zshrc.zsh",
+      "corpus": { "kind": "public", "path": "integrations/corpus/zsh/zshrc.zsh", "repository": "ohmyzsh/ohmyzsh", "revision": "c5ba74cf02cce4c342153f79089100194f30940f", "sourcePath": "templates/zshrc.zsh-template", "license": "MIT", "licenseFile": "integrations/corpus/licenses/ohmyzsh-MIT.txt" },
+      "expectedCapabilities": ["symbols", "diagnostics"],
+      "methods": [
+        { "name": "symbols", "method": "textDocument/documentSymbol", "expect": { "resultShape": "array", "minItems": 1 } },
+        { "name": "diagnostics", "method": "textDocument/diagnostic", "expect": { "resultShape": "object" } }
+      ]
+    },
+    {
+      "id": "bash-language-server",
+      "language": "bash",
+      "languageId": "shellscript",
+      "command": "bash-language-server",
+      "args": ["start"],
+      "versionArgs": ["--version"],
+      "file": "integrations/corpus/bash/sample.sh",
+      "corpus": { "kind": "local", "path": "integrations/corpus/bash/sample.sh" },
+      "expectedCapabilities": ["symbols"],
+      "methods": [
+        { "name": "symbols", "method": "textDocument/documentSymbol", "expect": { "resultShape": "array", "minItems": 1 } }
+      ]
+    },
+    {
+      "id": "markdown-oxide",
+      "language": "markdown",
+      "command": "markdown-oxide",
+      "args": [],
+      "versionArgs": ["--version"],
+      "file": "integrations/corpus/markdown/sample.md",
+      "corpus": { "kind": "local", "path": "integrations/corpus/markdown/sample.md" },
+      "expectedCapabilities": ["symbols"],
+      "methods": [
+        { "name": "symbols", "method": "textDocument/documentSymbol", "expect": { "resultShape": "array", "minItems": 1 } }
+      ]
+    },
+    {
+      "id": "tcsh-lsp",
+      "language": "tcsh",
+      "command": "tcsh-lsp",
+      "commandEnv": "CODE_INTEL_TCSH_LSP_COMMAND",
+      "args": ["--stdio"],
+      "versionArgs": ["--version"],
+      "file": "integrations/corpus/tcsh/dot.tcshrc",
+      "corpus": { "kind": "public", "path": "integrations/corpus/tcsh/dot.tcshrc", "repository": "tcsh-org/tcsh", "revision": "b7db07931546178c4cb2542b5fc850c483628ed5", "sourcePath": "dot.tcshrc", "license": "BSD-3-Clause", "licenseFile": "integrations/corpus/licenses/tcsh-BSD-3-Clause.txt" },
+      "expectedCapabilities": ["symbols"],
+      "methods": [
+        { "name": "symbols", "method": "textDocument/documentSymbol", "expect": { "resultShape": "array", "minItems": 1 } }
+      ]
+    },
+    {
+      "id": "slang-server",
+      "language": "systemverilog",
+      "command": "slang-server",
+      "args": [],
+      "versionArgs": ["--version"],
+      "file": "integrations/corpus/systemverilog/sample.sv",
+      "corpus": { "kind": "local", "path": "integrations/corpus/systemverilog/sample.sv" },
+      "expectedCapabilities": ["symbols"],
+      "methods": [
+        { "name": "symbols", "method": "textDocument/documentSymbol", "expect": { "resultShape": "array", "minItems": 1 }, "timeoutMs": 15000 }
+      ]
+    },
+    {
+      "id": "perlnavigator",
+      "language": "perl",
+      "command": "perlnavigator",
+      "args": ["--stdio"],
+      "file": "integrations/corpus/perl/sample.pl",
+      "corpus": { "kind": "local", "path": "integrations/corpus/perl/sample.pl" },
+      "expectedCapabilities": ["symbols"],
+      "methods": [
+        { "name": "symbols", "method": "textDocument/documentSymbol", "expect": { "resultShape": "array", "minItems": 1 } }
+      ]
+    },
+    {
+      "id": "vscode-json-language-server",
+      "language": "json",
+      "command": "vscode-json-language-server",
+      "args": ["--stdio"],
+      "file": "integrations/corpus/json/sample.json",
+      "corpus": { "kind": "local", "path": "integrations/corpus/json/sample.json" },
+      "expectedCapabilities": ["symbols", "diagnostics"],
+      "methods": [
+        { "name": "symbols", "method": "textDocument/documentSymbol", "expect": { "resultShape": "array", "minItems": 1 } },
+        { "name": "diagnostics", "method": "textDocument/diagnostic", "expect": { "resultShape": "object" } }
+      ]
+    },
+    {
+      "id": "yaml-language-server",
+      "language": "yaml",
+      "command": "yaml-language-server",
+      "args": ["--stdio"],
+      "versionArgs": ["--version"],
+      "file": "integrations/corpus/yaml/sample.yaml",
+      "corpus": { "kind": "local", "path": "integrations/corpus/yaml/sample.yaml" },
+      "expectedCapabilities": ["symbols", "diagnostics"],
+      "methods": [
+        { "name": "symbols", "method": "textDocument/documentSymbol", "expect": { "resultShape": "array", "minItems": 1 } },
+        { "name": "diagnostics", "method": "textDocument/diagnostic", "expect": { "resultShape": "object" }, "diagnosticSettleMs": 1500 }
+      ]
+    },
+    {
+      "id": "tcl-lsp",
+      "language": "tcl",
+      "command": "tcl-lsp",
+      "args": [],
+      "versionArgs": ["--help"],
+      "file": "integrations/corpus/tcl/sample.tcl",
+      "corpus": { "kind": "local", "path": "integrations/corpus/tcl/sample.tcl" },
+      "expectedCapabilities": ["symbols"],
+      "methods": [
+        { "name": "symbols", "method": "textDocument/documentSymbol", "expect": { "resultShape": "array", "minItems": 1 } }
+      ]
+    }
+  ]
+}

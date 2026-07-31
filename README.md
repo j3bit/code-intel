@@ -26,3 +26,14 @@ node scripts/init-code-intel.js --repo fixtures/repos/typescript-basic
 node scripts/doctor-code-intel.js --repo fixtures/repos/typescript-basic
 node scripts/validate-plugin.js
 ```
+
+Real language servers are exercised only by the opt-in matrix:
+
+```sh
+npm run integration:real
+```
+
+Missing optional servers are recorded as skips. If a configured executable is
+installed but its required protocol checks fail, the command exits non-zero and
+writes `artifacts/code-intel-integration-matrix.json` with executable paths,
+versions, per-method result hashes, and corpus provenance.

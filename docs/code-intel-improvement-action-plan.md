@@ -72,7 +72,17 @@
 - 새 도구는 initialize capability를 먼저 확인하며, completion과 semantic
   token 결과에는 1000 이하 상한 및 truncation metadata를 제공한다.
   formatting은 TextEdit preview만 반환하고 파일을 변경하지 않는다.
-- 현재 사용자 설정을 포함한 기본 validation은 236/236 통과한다.
+- 2026-07-31: P2-2 완료. deterministic fixture validation과 분리된 opt-in
+  real-server matrix를 추가하고, 미설치 서버는 skip, 설치된 서버의 protocol
+  regression은 실패로 처리한다.
+- Shuck(Bash/Zsh), Bash LS, markdown-oxide, tcsh-lsp, slang-server,
+  PerlNavigator, JSON/YAML/Tcl server를 실행해 10/10 항목이 통과했다. 결과
+  artifact에는 실행·실경로, 버전 출처, corpus provenance, method별 결과
+  shape/count/hash를 기록한다.
+- Oh My Zsh와 tcsh의 고정 revision corpus를 포함했다. 전체 matrix 종료에서
+  늦은 server request가 닫힌 stdin으로 응답하며 프로세스를 종료시키던
+  shutdown race도 재현 fixture와 함께 수정했다.
+- 기본 validation은 244/244 통과한다.
 
 ### 사용자 언어 도구
 

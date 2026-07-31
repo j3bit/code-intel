@@ -15,6 +15,7 @@
     "mcp:list-tools": "node mcp/code-intel-server/index.js --list-tools",
     "init:code-intel": "node scripts/init-code-intel.js",
     "doctor:code-intel": "node scripts/doctor-code-intel.js",
+    "integration:real": "node scripts/run-integration-matrix.js",
     "validate": "node scripts/validate-plugin.js"
   },
   "dependencies": {},

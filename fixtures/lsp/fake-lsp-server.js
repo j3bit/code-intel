@@ -339,6 +339,14 @@ function handle(message) {
     }
   }
   if (message.method === 'exit') {
+    if (process.env.CODE_INTEL_FAKE_LATE_SERVER_REQUEST_ON_EXIT === '1') {
+      frame({
+        jsonrpc: '2.0',
+        id: 9002,
+        method: 'workspace/workspaceFolders',
+        params: null
+      });
+    }
     trace('process-exit');
     process.exit(0);
   }

@@ -1,0 +1,3 @@
+service:
+  name: code-intel
+  enabled: true
