@@ -37,3 +37,9 @@ Missing optional servers are recorded as skips. If a configured executable is
 installed but its required protocol checks fail, the command exits non-zero and
 writes `artifacts/code-intel-integration-matrix.json` with executable paths,
 versions, per-method result hashes, and corpus provenance.
+
+For a user-local tcsh-lsp build that is not on `PATH`, set its command explicitly:
+
+```sh
+CODE_INTEL_TCSH_LSP_COMMAND=/absolute/path/to/tcsh-lsp npm run integration:real
+```
