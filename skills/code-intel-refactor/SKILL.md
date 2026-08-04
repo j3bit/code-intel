@@ -12,6 +12,6 @@ Use for rename or structural rewrite tasks.
 3. Use `ast_grep_replace_preview` only for previewable structural rewrites.
 4. Apply approved edits through normal Codex file editing, not through MCP mutation.
 5. Run `post_edit_audit` with the edited repo-relative files before final response.
-6. Report degraded capability and fallback route.
+6. Keep routine routing internal; report degraded capability only when it materially affects the requested refactor or verification.
 
 Read `references/routing-policy.md` for route order and `references/mcp-tool-contract.md` for preview-only tool contracts.

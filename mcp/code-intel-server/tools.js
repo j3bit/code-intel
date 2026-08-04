@@ -129,7 +129,9 @@ export const commonProps = {
   repoRoot: { type: 'string', description: 'Repository root. Defaults to current working directory.' },
   language: { type: 'string', description: 'Language id such as typescript or python.' },
   file: { type: 'string', description: 'Repo-relative file path for LSP-oriented operations.' },
-  position: { type: 'object', description: 'Zero-based LSP position {line, character}.' }
+  position: { type: 'object', description: 'Zero-based LSP position {line, character}.' },
+  pageSize: { type: 'number', description: 'Results returned per page; defaults to 20 and is capped at 100.' },
+  cursor: { type: 'string', description: 'Opaque cursor from a previous page of the same search.' }
 };
 
 export const tools = TOOL_NAMES.map((name) => {
@@ -146,9 +148,16 @@ export const tools = TOOL_NAMES.map((name) => {
       intent: { type: 'string', enum: ['semantic', 'structural', 'diagnostics', 'rename', 'audit'] }
     };
   } else if (name === 'ast_grep_search') {
-    base.description = 'Run preview/read-only structural search through the ast-grep executable when available.';
+    base.description = 'Run exhaustive read-only structural search and return a stable, bounded result page.';
     base.inputSchema.required = ['pattern', 'language'];
-    base.inputSchema.properties = { repoRoot: commonProps.repoRoot, pattern: { type: 'string' }, language: commonProps.language, maxResults: { type: 'number' } };
+    base.inputSchema.properties = {
+      repoRoot: commonProps.repoRoot,
+      pattern: { type: 'string' },
+      language: commonProps.language,
+      pageSize: commonProps.pageSize,
+      cursor: commonProps.cursor,
+      maxResults: { type: 'number', description: 'Deprecated alias for pageSize.' }
+    };
   } else if (name === 'ast_grep_scan') {
     base.description = 'Run read-only ast-grep rule scan using the effective astGrep.configPath.';
     base.inputSchema.properties = {
@@ -157,9 +166,17 @@ export const tools = TOOL_NAMES.map((name) => {
       maxResults: { type: 'number' }
     };
   } else if (name === 'ast_grep_replace_preview') {
-    base.description = 'Preview structural replacement candidates without mutating files.';
+    base.description = 'Preview one stable page of exhaustive structural replacement candidates without mutating files.';
     base.inputSchema.required = ['pattern', 'language', 'replacement'];
-    base.inputSchema.properties = { repoRoot: commonProps.repoRoot, pattern: { type: 'string' }, language: commonProps.language, replacement: { type: 'string' }, maxResults: { type: 'number' } };
+    base.inputSchema.properties = {
+      repoRoot: commonProps.repoRoot,
+      pattern: { type: 'string' },
+      language: commonProps.language,
+      replacement: { type: 'string' },
+      pageSize: commonProps.pageSize,
+      cursor: commonProps.cursor,
+      maxResults: { type: 'number', description: 'Deprecated alias for pageSize.' }
+    };
   } else if (name === 'post_edit_audit') {
     base.description = 'Run explicit post-edit audit: LSP diagnostics per file when available and ast-grep rule scan when configured.';
     base.inputSchema.properties = {

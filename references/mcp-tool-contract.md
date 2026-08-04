@@ -26,3 +26,9 @@ before sending a method request. Completion and semantic-token results report
 `totalItems`, `returnedItems`, `maxResults`, and `truncated`; callers cannot raise
 the limit above 1000. Formatting returns only `TextEdit` preview data with
 `previewOnly: true` and `mutated: false`.
+
+`ast_grep_search` runs the complete search into an expiring local result set and
+returns a bounded page. Callers continue with the opaque `nextCursor` and the
+same repository, language, and pattern. `complete: true` means the stored result
+set is exhaustive; `pageComplete: true` means the current page is the last page.
+`maxResults` remains a deprecated alias for `pageSize`.

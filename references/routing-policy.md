@@ -9,9 +9,9 @@ Use `code-intel` when the user asks for code structure, symbols, definitions, re
 3. Use `ast-grep` when the task is structurally expressible and the effective settings define an ast-grep language id for that language.
 4. Use `ast_grep_scan` when the effective settings define `astGrep.configPath` and the task needs configured rule-based AST audit.
 5. Supplement with `rg` or `grep` for strings, logs, filenames, generated files, unsupported languages, incomplete AST output, or confirmation.
-6. Report the route used and any fallback reason.
+6. Keep ordinary route selection internal. Disclose fallback only when it materially changes completeness, correctness, confidence, or the requested workflow.
 
-Fallback is not failure. It lowers confidence and should be visible in the final response.
+Fallback is not failure. Do not narrate a routine fallback. Surface it briefly in the final response only when the lower confidence or reduced coverage matters to the user, or when the user asks for diagnostics.
 
 ## Behavior scenario routes
 

@@ -19,7 +19,13 @@ Use this skill for codebase questions involving declarations, patterns, API usag
 8. Use `lsp_hover`, `lsp_completion`, and `lsp_semantic_tokens` only when their responses verify the method.
 9. Use `lsp_formatting_preview` for formatting proposals; it must not mutate files.
 10. Use `rg`/`grep` fallback for strings, filenames, logs, generated files, unsupported languages, missing tools, or inconclusive code-intel output.
-11. Report the route and fallback reason.
+11. Keep routine route selection and successful fallback internal.
+
+## Communication
+
+- Do not announce the skill, route decision, tool call, or routine fallback before or during work.
+- Mention fallback in the final response only when it materially reduces completeness, correctness, or confidence; blocks the requested behavior; or the user asks for diagnostics.
+- When disclosure is required, state the impact briefly instead of narrating the routing process.
 
 ## Command Policy
 

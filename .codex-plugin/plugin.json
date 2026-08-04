@@ -1,6 +1,6 @@
 {
   "name": "code-intel",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Language-aware code intelligence for Codex: AST search, LSP navigation, preview-only refactors, and explicit fallback routing.",
   "author": {
     "name": "Local"
@@ -21,7 +21,7 @@
   "interface": {
     "displayName": "Code Intel",
     "shortDescription": "Prefer AST/LSP code intelligence before text fallback.",
-    "longDescription": "Code Intel adds standalone Codex skills, an MCP server, settings contract, optional soft hooks, and validation workflows so agents can use language-aware search, navigation, references, rename previews, rewrite previews, and post-edit diagnostics with explicit fallback reasons.",
+    "longDescription": "Code Intel adds standalone Codex skills, an MCP server, settings contract, and validation workflows so agents can silently use language-aware search, navigation, references, rename previews, rewrite previews, and post-edit diagnostics with structured fallback reasons.",
     "developerName": "Local",
     "category": "Coding",
     "capabilities": [
@@ -30,10 +30,9 @@
       "Write"
     ],
     "defaultPrompt": [
-      "Use code-intel before text fallback."
+      "Use code-intel silently before text fallback; disclose only material degradation."
     ],
     "brandColor": "#2563EB",
     "screenshots": []
-  },
-  "hooks": "./hooks/hooks.json"
+  }
 }

@@ -1,8 +1,16 @@
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { expandHome, loadSettings } from './settings.js';
 import { detectExecutableFromSettings, languageConfigForLanguage } from './capabilities.js';
 import { resolveRepoRelativePaths } from './repo.js';
+
+const SEARCH_RESULTS_DIR = path.join(os.tmpdir(), 'code-intel-ast-results-v1');
+const SEARCH_RESULT_TTL_MS = 60 * 60 * 1000;
+const DEFAULT_PAGE_SIZE = 20;
+const MAX_PAGE_SIZE = 100;
 
 export function astUnavailable(language, reason = 'ast-grep executable was not found on PATH', settings = null) {
   return {
@@ -19,15 +27,195 @@ export function astUnavailable(language, reason = 'ast-grep executable was not f
 
 export function normalizeAstGrepJson(stdout, language = null) {
   if (!stdout.trim()) return [];
-  const parsed = JSON.parse(stdout);
-  const rows = Array.isArray(parsed) ? parsed : [parsed];
-  return rows.map((item) => ({
+  let rows;
+  try {
+    const parsed = JSON.parse(stdout);
+    rows = Array.isArray(parsed) ? parsed : [parsed];
+  } catch {
+    rows = stdout.split(/\r?\n/).filter(Boolean).flatMap((line) => {
+      const parsed = JSON.parse(line);
+      return Array.isArray(parsed) ? parsed : [parsed];
+    });
+  }
+  return rows.map((item) => normalizeAstGrepItem(item, language));
+}
+
+function normalizeAstGrepItem(item, language = null) {
+  return {
     file: item.file || item.path || item.filePath || null,
     range: item.range || item.metaVariables?.single?.range || null,
     match: item.text || item.lines || item.match || item.source || null,
     language: item.language || language,
     confidence: 'ast-grep'
-  }));
+  };
+}
+
+function boundedPageSize(value) {
+  const parsed = Number(value ?? DEFAULT_PAGE_SIZE);
+  if (!Number.isFinite(parsed)) return DEFAULT_PAGE_SIZE;
+  return Math.max(1, Math.min(Math.floor(parsed), MAX_PAGE_SIZE));
+}
+
+function resultSetFiles(id) {
+  return {
+    data: path.join(SEARCH_RESULTS_DIR, `${id}.jsonl`),
+    metadata: path.join(SEARCH_RESULTS_DIR, `${id}.json`)
+  };
+}
+
+function removeResultSet(id) {
+  const files = resultSetFiles(id);
+  fs.rmSync(files.data, { force: true });
+  fs.rmSync(files.metadata, { force: true });
+}
+
+function cleanupExpiredResultSets(now = Date.now()) {
+  if (!fs.existsSync(SEARCH_RESULTS_DIR)) return;
+  for (const entry of fs.readdirSync(SEARCH_RESULTS_DIR)) {
+    if (!entry.endsWith('.json')) continue;
+    const id = entry.slice(0, -'.json'.length);
+    try {
+      const metadata = JSON.parse(fs.readFileSync(path.join(SEARCH_RESULTS_DIR, entry), 'utf8'));
+      if (Date.parse(metadata.expiresAt) <= now) removeResultSet(id);
+    } catch {
+      removeResultSet(id);
+    }
+  }
+}
+
+function encodeCursor(id, offset) {
+  return Buffer.from(JSON.stringify({ version: 1, id, offset }), 'utf8').toString('base64url');
+}
+
+function decodeCursor(cursor) {
+  if (typeof cursor !== 'string' || cursor.length === 0 || cursor.length > 512) {
+    throw new Error('cursor must be a non-empty opaque string');
+  }
+  let decoded;
+  try {
+    decoded = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+  } catch {
+    throw new Error('cursor is invalid or expired');
+  }
+  if (
+    decoded?.version !== 1 ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(decoded.id || '') ||
+    !Number.isInteger(decoded.offset) ||
+    decoded.offset < 0
+  ) {
+    throw new Error('cursor is invalid or expired');
+  }
+  return decoded;
+}
+
+function visitJsonLines(file, visitor) {
+  const fd = fs.openSync(file, 'r');
+  const chunk = Buffer.allocUnsafe(64 * 1024);
+  let carry = Buffer.alloc(0);
+  let position = 0;
+  let stopped = false;
+  const visitLine = (lineBuffer) => {
+    const line = lineBuffer.toString('utf8').trim();
+    if (!line) return true;
+    const parsed = JSON.parse(line);
+    const rows = Array.isArray(parsed) ? parsed : [parsed];
+    for (const row of rows) {
+      if (visitor(row) === false) return false;
+    }
+    return true;
+  };
+  try {
+    while (!stopped) {
+      const bytesRead = fs.readSync(fd, chunk, 0, chunk.length, position);
+      if (bytesRead === 0) break;
+      position += bytesRead;
+      const data = carry.length
+        ? Buffer.concat([carry, chunk.subarray(0, bytesRead)])
+        : chunk.subarray(0, bytesRead);
+      let lineStart = 0;
+      let newline = data.indexOf(0x0a, lineStart);
+      while (newline >= 0) {
+        if (!visitLine(data.subarray(lineStart, newline))) {
+          stopped = true;
+          break;
+        }
+        lineStart = newline + 1;
+        newline = data.indexOf(0x0a, lineStart);
+      }
+      carry = stopped ? Buffer.alloc(0) : Buffer.from(data.subarray(lineStart));
+    }
+    if (!stopped && carry.length) visitLine(carry);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function collectResultPage(file, language, offset, pageSize, countAll = false) {
+  const results = [];
+  let seen = 0;
+  visitJsonLines(file, (item) => {
+    if (seen >= offset && results.length < pageSize) {
+      results.push(normalizeAstGrepItem(item, language));
+    }
+    seen += 1;
+    return countAll || seen < offset + pageSize;
+  });
+  return { results, seen };
+}
+
+function pagedSearchResult(metadata, offset, pageSize, results, fallback) {
+  const nextOffset = offset + results.length;
+  const nextCursor = nextOffset < metadata.totalItems
+    ? encodeCursor(metadata.id, nextOffset)
+    : null;
+  return {
+    status: 'ok',
+    complete: true,
+    resultSetId: metadata.id,
+    generatedAt: metadata.generatedAt,
+    expiresAt: metadata.expiresAt,
+    executable: metadata.executable,
+    configPath: metadata.configPath,
+    resolvedCommand: metadata.resolvedCommand,
+    language: metadata.language,
+    astGrepLanguageId: metadata.astGrepLanguageId,
+    patternSummary: metadata.pattern.slice(0, 120),
+    pageOffset: offset,
+    pageSize,
+    pageComplete: nextCursor === null,
+    totalItems: metadata.totalItems,
+    returnedItems: results.length,
+    truncated: metadata.totalItems > results.length,
+    nextCursor,
+    results,
+    fallback: metadata.totalItems ? [] : fallback,
+    fallbackReason: metadata.totalItems ? null : 'ast-grep returned no matches; text supplement may be useful'
+  };
+}
+
+function pageFromCursor(args, repoRoot, language, astGrepLanguageId, fallback) {
+  const { id, offset } = decodeCursor(args.cursor);
+  const files = resultSetFiles(id);
+  if (!fs.existsSync(files.metadata) || !fs.existsSync(files.data)) {
+    throw new Error('cursor is invalid or expired');
+  }
+  const metadata = JSON.parse(fs.readFileSync(files.metadata, 'utf8'));
+  if (Date.parse(metadata.expiresAt) <= Date.now()) {
+    removeResultSet(id);
+    throw new Error('cursor is invalid or expired');
+  }
+  if (
+    metadata.repoRoot !== repoRoot ||
+    metadata.language !== language ||
+    metadata.astGrepLanguageId !== astGrepLanguageId ||
+    metadata.pattern !== args.pattern
+  ) {
+    throw new Error('cursor does not match this search request');
+  }
+  if (offset > metadata.totalItems) throw new Error('cursor offset is outside the result set');
+  const pageSize = boundedPageSize(args.pageSize ?? args.maxResults);
+  const page = collectResultPage(files.data, astGrepLanguageId, offset, pageSize);
+  return pagedSearchResult(metadata, offset, pageSize, page.results, fallback);
 }
 
 function normalizeAstGrepScanJson(stdout) {
@@ -58,15 +246,45 @@ export function astGrepSearch(args = {}) {
   if (!pattern) return { status: 'error', error: 'pattern is required', results: [], fallback: settings.fallback, configPath: settings.astGrep.configPath || null };
   const { language: resolvedLanguage, config } = language ? languageConfigForLanguage(language, settings) : { language: null, config: null };
   if (language && !config) return astUnavailable(language, `unsupported language: ${language}`, settings);
-  const ast = detectExecutableFromSettings(settings.astGrep.command, ['--version'], repoRoot, settings);
-  if (!ast.available) return astUnavailable(language || 'unknown', `${settings.astGrep.command} executable was not found on PATH`, settings);
   const lang = config?.astGrep.languageId || language;
   if (!lang) return { status: 'needs_language', error: 'language is required when path inference is not provided', results: [], fallback: settings.fallback, configPath: settings.astGrep.configPath || null };
+  if (args.cursor) {
+    try {
+      return pageFromCursor(args, repoRoot, resolvedLanguage || language || lang, lang, settings.fallback);
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        results: [],
+        fallback: settings.fallback,
+        fallbackReason: 'paged ast-grep result set is unavailable; rerun the search without a cursor'
+      };
+    }
+  }
+  const ast = detectExecutableFromSettings(settings.astGrep.command, ['--version'], repoRoot, settings);
+  if (!ast.available) return astUnavailable(language || 'unknown', `${settings.astGrep.command} executable was not found on PATH`, settings);
   const cmdArgs = ['run'];
   if (settings.astGrep.configPath) cmdArgs.push('--config', expandHome(settings.astGrep.configPath));
-  cmdArgs.push('--pattern', pattern, '--lang', lang, '--json', repoRoot);
-  const result = spawnSync(ast.resolvedCommand || settings.astGrep.command, cmdArgs, { cwd: repoRoot, encoding: 'utf8', timeout: args.timeoutMs || 10000, maxBuffer: 10 * 1024 * 1024 });
-  if (result.status !== 0 && !result.stdout) {
+  cmdArgs.push('--pattern', pattern, '--lang', lang, '--json=stream', repoRoot);
+  fs.mkdirSync(SEARCH_RESULTS_DIR, { recursive: true, mode: 0o700 });
+  cleanupExpiredResultSets();
+  const id = crypto.randomUUID();
+  const files = resultSetFiles(id);
+  const outputFd = fs.openSync(files.data, 'wx', 0o600);
+  let result;
+  try {
+    result = spawnSync(ast.resolvedCommand || settings.astGrep.command, cmdArgs, {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      timeout: args.timeoutMs || 10000,
+      maxBuffer: 1024 * 1024,
+      stdio: ['ignore', outputFd, 'pipe']
+    });
+  } finally {
+    fs.closeSync(outputFd);
+  }
+  if (result.status !== 0 || result.error) {
+    removeResultSet(id);
     return {
       status: 'error',
       executable: settings.astGrep.command,
@@ -81,21 +299,37 @@ export function astGrepSearch(args = {}) {
       commandPolicy: 'this plugin does not call sg'
     };
   }
-  let results = [];
-  try { results = normalizeAstGrepJson(result.stdout, lang).slice(0, args.maxResults || 100); }
-  catch (error) { return { status: 'error', error: `failed to parse ast-grep JSON: ${error.message}`, raw: result.stdout.slice(0, 1000), fallback: settings.fallback, configPath: settings.astGrep.configPath || null }; }
-  return {
-    status: 'ok',
+  const pageSize = boundedPageSize(args.pageSize ?? args.maxResults);
+  let firstPage;
+  try {
+    firstPage = collectResultPage(files.data, lang, 0, pageSize, true);
+  } catch (error) {
+    removeResultSet(id);
+    return {
+      status: 'error',
+      error: `failed to parse ast-grep JSON stream: ${error.message}`,
+      results: [],
+      fallback: settings.fallback,
+      configPath: settings.astGrep.configPath || null
+    };
+  }
+  const generatedAt = new Date();
+  const metadata = {
+    version: 1,
+    id,
+    repoRoot,
+    language: resolvedLanguage || language || lang,
+    astGrepLanguageId: lang,
+    pattern,
     executable: settings.astGrep.command,
     configPath: settings.astGrep.configPath || null,
     resolvedCommand: ast.resolvedCommand,
-    language: resolvedLanguage || language || lang,
-    astGrepLanguageId: lang,
-    patternSummary: pattern.slice(0, 120),
-    results,
-    fallback: results.length ? [] : settings.fallback,
-    fallbackReason: results.length ? null : 'ast-grep returned no matches; text supplement may be useful'
+    totalItems: firstPage.seen,
+    generatedAt: generatedAt.toISOString(),
+    expiresAt: new Date(generatedAt.getTime() + SEARCH_RESULT_TTL_MS).toISOString()
   };
+  fs.writeFileSync(files.metadata, JSON.stringify(metadata), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  return pagedSearchResult(metadata, 0, pageSize, firstPage.results, settings.fallback);
 }
 
 export function astGrepScan(args = {}) {
@@ -157,6 +391,17 @@ export function astGrepReplacePreview(args = {}) {
     manualEditRequired: true,
     note: 'Match-only preview: replacement templates are not expanded by this MVP tool. Apply edits through normal Codex file editing after reviewing candidates.',
     patchCandidates: search.results.map((r) => ({ file: r.file, range: r.range, before: r.match, replacementTemplate: replacement, confidence: r.confidence, mode: 'match-only' })),
+    complete: search.complete,
+    resultSetId: search.resultSetId,
+    generatedAt: search.generatedAt,
+    expiresAt: search.expiresAt,
+    pageOffset: search.pageOffset,
+    pageSize: search.pageSize,
+    pageComplete: search.pageComplete,
+    totalItems: search.totalItems,
+    returnedItems: search.returnedItems,
+    truncated: search.truncated,
+    nextCursor: search.nextCursor,
     fallback: search.fallback,
     fallbackReason: search.fallbackReason
   };

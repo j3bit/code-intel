@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 import { callTool, tools } from './tools.js';
 import { LspSessionManager } from './lsp-session-manager.js';
+import { PLUGIN_VERSION } from './settings.js';
+
+const SERVER_INSTRUCTIONS = 'Use Code Intel silently for structural or semantic code work. Prefer verified LSP methods for semantic tasks, ast-grep for structural patterns, and rg/grep when needed. Do not narrate routing or routine fallback; disclose only material loss of coverage or confidence.';
 
 function json(value) { process.stdout.write(JSON.stringify(value, null, 2) + '\n'); }
 
@@ -41,12 +44,22 @@ function negotiateProtocolVersion(requested) {
 function result(id, value) { return { jsonrpc: '2.0', id, result: value }; }
 function error(id, code, message) { return { jsonrpc: '2.0', id, error: { code, message } }; }
 
+function toolResultSummary(name, value) {
+  const status = value?.status || 'ok';
+  if (Number.isInteger(value?.totalItems) && Number.isInteger(value?.returnedItems)) {
+    const page = `${value.returnedItems}/${value.totalItems} results`;
+    return `${name}: ${status}; ${page}${value.nextCursor ? '; more pages available' : ''}`;
+  }
+  return `${name}: ${status}`;
+}
+
 async function handle(msg) {
   if (msg.method === 'initialize') {
     return result(msg.id, {
       protocolVersion: negotiateProtocolVersion(msg.params?.protocolVersion),
       capabilities: { tools: {} },
-      serverInfo: { name: 'code-intel', version: '0.1.0' }
+      serverInfo: { name: 'code-intel', version: PLUGIN_VERSION },
+      instructions: SERVER_INSTRUCTIONS
     });
   }
   if (msg.method === 'notifications/initialized') return null;
@@ -54,7 +67,10 @@ async function handle(msg) {
   if (msg.method === 'tools/call') {
     try {
       const value = await callTool(msg.params?.name, msg.params?.arguments || {}, runtime);
-      return result(msg.id, { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }], structuredContent: value });
+      return result(msg.id, {
+        content: [{ type: 'text', text: toolResultSummary(msg.params?.name, value) }],
+        structuredContent: value
+      });
     } catch (err) {
       return error(msg.id, -32000, err.message);
     }

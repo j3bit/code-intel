@@ -148,12 +148,23 @@ const manifest = readJson('.codex-plugin/plugin.json');
 check('manifest required fields', ['name','version','description','skills','interface'].every((k) => manifest[k]), Object.keys(manifest).join(', '));
 check('manifest name is code-intel', manifest.name === 'code-intel', manifest.name);
 check('mcp server manifest exists', exists('.mcp.json'), '.mcp.json');
-check('hook manifest declared when hooks are shipped', manifest.hooks === './hooks/hooks.json' && exists('hooks/hooks.json'), manifest.hooks || '(missing)');
+check(
+  'plugin ships no context-injecting hooks',
+  !manifest.hooks && !exists('hooks/hooks.json') && !exists('hooks/user-prompt-submit.js'),
+  manifest.hooks || 'no hooks'
+);
 for (const skill of SKILLS) check(`skill ${skill} exists`, exists(`skills/${skill}/SKILL.md`), `skills/${skill}/SKILL.md`);
 for (const skill of SKILLS) {
   const relPath = `skills/${skill}/SKILL.md`;
   const error = exists(relPath) ? validateSkillFrontmatter(relPath) : 'missing file';
   check(`skill ${skill} frontmatter parseable`, !error, error || relPath);
+  const policyPath = `skills/${skill}/agents/openai.yaml`;
+  const policy = exists(policyPath) ? fs.readFileSync(path.join(ROOT, policyPath), 'utf8') : '';
+  check(
+    `skill ${skill} is explicit-invocation only`,
+    /allow_implicit_invocation:\s*false/.test(policy),
+    policyPath
+  );
 }
 for (const ref of REFS) check(`reference ${ref} exists`, exists(`references/${ref}`), `references/${ref}`);
 check('settings schema exists', exists('settings/schema.json'), 'settings/schema.json');
@@ -560,6 +571,18 @@ check(
 const coreSource = fs.readFileSync(path.join(ROOT, 'mcp/code-intel-server/core.js'), 'utf8');
 const coreLineCount = coreSource.split(/\r?\n/).length;
 check('core.js stays facade-sized', coreLineCount <= 260, `${coreLineCount} lines`);
+const serverSource = fs.readFileSync(path.join(ROOT, 'mcp/code-intel-server/index.js'), 'utf8');
+check(
+  'MCP text content does not duplicate the full structured result',
+  !serverSource.includes("text: JSON.stringify(value, null, 2)"),
+  'return a short text summary beside structuredContent'
+);
+check(
+  'MCP initialize supplies concise silent-routing instructions',
+  serverSource.includes('instructions: SERVER_INSTRUCTIONS') &&
+    /Do not narrate routing or routine fallback/.test(serverSource),
+  'server instructions should route tools without workflow-skill narration'
+);
 const forbiddenCorePatterns = [
   [/function\s+postEditAudit\b/, 'post-edit audit use case belongs in audit.js'],
   [/function\s+gitChangedFiles\b/, 'git changed-file driver belongs in repo.js'],
@@ -606,6 +629,77 @@ check(
 );
 const missingAst = callTool('ast_grep_search', { repoRoot: ROOT, language: 'definitely-unsupported', pattern: 'class $A' });
 check('ast-grep unsupported language reports unavailable cleanly', missingAst.status === 'unavailable' && missingAst.fallbackReason.includes('unsupported'), JSON.stringify(missingAst));
+const pagedAstRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-paged-ast-'));
+try {
+  const pagedAstBin = path.join(pagedAstRoot, 'bin');
+  const pagedAstRepo = path.join(pagedAstRoot, 'repo');
+  const pagedAstSettings = path.join(pagedAstRoot, 'settings.json');
+  fs.mkdirSync(pagedAstBin, { recursive: true });
+  fs.mkdirSync(pagedAstRepo, { recursive: true });
+  const fakeAstGrep = path.join(pagedAstBin, 'ast-grep');
+  fs.writeFileSync(fakeAstGrep, `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--version" ]; then
+    echo "ast-grep fake-paged"
+    exit 0
+  fi
+done
+printf '%s\n' \
+  '{"file":"one.py","text":"call(1)","language":"Python"}' \
+  '{"file":"two.py","text":"call(2)","language":"Python"}' \
+  '{"file":"three.py","text":"call(3)","language":"Python"}' \
+  '{"file":"four.py","text":"call(4)","language":"Python"}' \
+  '{"file":"five.py","text":"call(5)","language":"Python"}'
+`);
+  fs.chmodSync(fakeAstGrep, 0o755);
+  writeJson(pagedAstSettings, {
+    version: 1,
+    path: { extraDirs: [pagedAstBin] },
+    astGrep: { command: 'ast-grep' }
+  });
+  const pagedAstEnv = {
+    ...process.env,
+    PATH: pagedAstBin,
+    CODE_INTEL_USER_SETTINGS_PATH: path.join(pagedAstRoot, 'missing-user-settings.json'),
+    CODE_INTEL_PROJECT_SETTINGS_PATH: pagedAstSettings
+  };
+  const commonArgs = {
+    repoRoot: pagedAstRepo,
+    language: 'python',
+    pattern: 'call($A)',
+    pageSize: 2
+  };
+  const firstProbe = runToolProbe('ast_grep_search', commonArgs, pagedAstEnv);
+  const firstPage = firstProbe.output;
+  fs.writeFileSync(fakeAstGrep, '#!/bin/sh\nexit 9\n');
+  fs.chmodSync(fakeAstGrep, 0o755);
+  const secondProbe = runToolProbe('ast_grep_search', { ...commonArgs, cursor: firstPage.nextCursor }, pagedAstEnv);
+  const secondPage = secondProbe.output;
+  const thirdProbe = runToolProbe('ast_grep_search', { ...commonArgs, cursor: secondPage.nextCursor }, pagedAstEnv);
+  const thirdPage = thirdProbe.output;
+  const matches = [firstPage, secondPage, thirdPage]
+    .flatMap((page) => page.results || [])
+    .map((row) => row.match);
+  check(
+    'ast-grep search preserves every result across stable pages',
+    firstProbe.processResult.status === 0 &&
+      secondProbe.processResult.status === 0 &&
+      thirdProbe.processResult.status === 0 &&
+      firstPage.status === 'ok' &&
+      firstPage.complete === true &&
+      firstPage.totalItems === 5 &&
+      firstPage.returnedItems === 2 &&
+      typeof firstPage.nextCursor === 'string' &&
+      secondPage.resultSetId === firstPage.resultSetId &&
+      thirdPage.resultSetId === firstPage.resultSetId &&
+      thirdPage.nextCursor === null &&
+      thirdPage.pageComplete === true &&
+      sameJson(matches, ['call(1)', 'call(2)', 'call(3)', 'call(4)', 'call(5)']),
+    JSON.stringify({ firstPage, secondPage, thirdPage }).slice(0, 2000)
+  );
+} finally {
+  fs.rmSync(pagedAstRoot, { recursive: true, force: true });
+}
 const missingLsp = callTool('lsp_find_references', { repoRoot: ROOT, language: 'json', file: 'package.json', position: { line: 0, character: 0 } });
 check('LSP tool reports unavailable cleanly when no server declared', missingLsp.status === 'unavailable' && missingLsp.fallbackReason, JSON.stringify(missingLsp));
 const emptyToolPathRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-empty-path-'));
@@ -3159,45 +3253,13 @@ try {
   fs.rmSync(staleTmpRoot, { recursive: true, force: true });
 }
 
-// Hook validation
-const hookManifest = readJson('hooks/hooks.json');
+const coreSkillSource = fs.readFileSync(path.join(ROOT, 'skills/code-intel/SKILL.md'), 'utf8');
 check(
-  'hook manifest wires only prompt-time soft hook',
-  JSON.stringify(hookManifest.hooks?.UserPromptSubmit || '').includes('${PLUGIN_ROOT}/hooks/user-prompt-submit.js') &&
-    !hookManifest.hooks?.PreToolUse &&
-    !hookManifest.hooks?.PostToolUse,
-  JSON.stringify(hookManifest).slice(0, 500)
+  'code-intel skill keeps routine tool routing internal',
+  /do not announce/i.test(coreSkillSource) &&
+    /materially (reduces|affects)/i.test(coreSkillSource),
+  coreSkillSource.slice(0, 1200)
 );
-function parseHookOutput(stdout) {
-  if (!stdout.trim()) return { ok: true, empty: true, value: null, evidence: 'empty stdout' };
-  try {
-    const value = JSON.parse(stdout);
-    return { ok: true, empty: false, value, evidence: stdout };
-  } catch (error) {
-    return { ok: false, empty: false, value: null, evidence: error.message };
-  }
-}
-function validSoftHookOutput(stdout, expected) {
-  const parsed = parseHookOutput(stdout);
-  if (!parsed.ok || parsed.empty || !parsed.value || Array.isArray(parsed.value)) return { ok: false, evidence: parsed.evidence };
-  const allowedTopLevel = new Set(['continue', 'stopReason', 'suppressOutput', 'systemMessage', 'decision', 'reason', 'hookSpecificOutput']);
-  const unknownTopLevel = Object.keys(parsed.value).filter((key) => !allowedTopLevel.has(key));
-  const hookSpecificOutput = parsed.value.hookSpecificOutput;
-  const ok = unknownTopLevel.length === 0 &&
-    hookSpecificOutput &&
-    hookSpecificOutput.hookEventName === expected &&
-    typeof hookSpecificOutput.additionalContext === 'string' &&
-    hookSpecificOutput.additionalContext.includes('code-intel') &&
-    hookSpecificOutput.additionalContext.length < 360;
-  return { ok, evidence: ok ? hookSpecificOutput.additionalContext : JSON.stringify({ unknownTopLevel, value: parsed.value }).slice(0, 800) };
-}
-const promptHook = run('node', ['hooks/user-prompt-submit.js'], { input: 'rename symbol and find references' });
-const promptHookResult = validSoftHookOutput(promptHook.stdout, 'UserPromptSubmit');
-check('UserPromptSubmit emits one short Codex-compatible JSON hint', promptHook.status === 0 && promptHookResult.ok, promptHookResult.evidence || promptHook.stderr);
-const ordinaryPromptHook = run('node', ['hooks/user-prompt-submit.js'], { input: 'summarize the README' });
-check('UserPromptSubmit stays silent for non-code-intel prompts', ordinaryPromptHook.status === 0 && ordinaryPromptHook.stdout.trim() === '', ordinaryPromptHook.stdout);
-check('PreToolUse hook script retired', !exists('hooks/pre-tool-use.js'), 'hooks/pre-tool-use.js');
-check('PostToolUse hook script retired', !exists('hooks/post-tool-use.js'), 'hooks/post-tool-use.js');
 const splitFrame = await new Promise((resolve) => {
   const child = spawn(process.execPath, ['mcp/code-intel-server/index.js'], {
     cwd: ROOT,
@@ -3265,7 +3327,7 @@ check('MCP tool contract documents every expected tool', undocumentedTools.lengt
 
 // No forbidden command path in executable/config surfaces.
 const scanFiles = [];
-for (const dir of ['scripts','hooks','settings','mcp']) {
+for (const dir of ['scripts','settings','mcp']) {
   const stack = [path.join(ROOT, dir)];
   while (stack.length) {
     const item = stack.pop();
@@ -3278,7 +3340,7 @@ for (const dir of ['scripts','hooks','settings','mcp']) {
 }
 const commandCallPattern = /(?:spawnSync|spawn|execFile|exec)\s*\(\s*['"]sg['"]|"command"\s*:\s*"sg"/;
 const offenders = scanFiles.filter((file) => commandCallPattern.test(fs.readFileSync(file, 'utf8'))).map(rel);
-check('no script hook settings or MCP path calls forbidden shorthand command', offenders.length === 0, offenders.join(', ') || 'none');
+check('no script settings or MCP path calls forbidden shorthand command', offenders.length === 0, offenders.join(', ') || 'none');
 
 const retiredTerms = [
   ['ad', 'apter'].join(''),

@@ -19,8 +19,8 @@ The plugin should remain standalone and behavior-first:
 
 - **Standalone Codex plugin:** skills and MCP tools must work without assuming
   any specific orchestration runtime.
-- **Optional acceleration:** hooks may provide short routing nudges, but they
-  must not become correctness dependencies.
+- **Silent implicit routing:** concise MCP server instructions and tool metadata
+  guide ordinary code-intel use without invoking a workflow skill or hook.
 - **External tooling:** do not bundle `ast-grep`, language servers, or custom
   parser build chains in the core path.
 - **No automatic installation:** report missing tools with install hints, but do
@@ -34,7 +34,7 @@ The plugin should remain standalone and behavior-first:
 
 ## Operating Model
 
-`code-intel` has four cooperating layers:
+`code-intel` has three cooperating layers:
 
 1. **MCP capability layer** — exposes actual code-intelligence tools that can be
    attached independently of any orchestration runtime. Its public surface is
@@ -42,18 +42,14 @@ The plugin should remain standalone and behavior-first:
    routing, ast-grep, LSP, audit orchestration, audit result formatting, and MCP
    tool dispatch. `core.js` stays a compatibility facade rather than a place for
    new workflows.
-2. **Skill behavior layer** — teaches agents when to prefer code-intel for
-   search, navigation, references, rename, rewrite, diagnostics, and audits.
-3. **Optional hook layer** — provides at most a short prompt-time routing hint
-   for structural or semantic code intent. It must not inject repeated pre-tool
-   or post-tool reminders.
-4. **Settings and reporting layer** — keeps language coverage declarative in
+2. **Explicit skill behavior layer** — provides opt-in initialization, doctor,
+   and refactor workflows without driving ordinary tool selection.
+3. **Settings and reporting layer** — keeps language coverage declarative in
    settings defaults/schema and writes durable capability evidence for future
    turns.
 
-Hooks may improve discovery, but the MCP server and skills must remain useful
-when hooks are absent. Generated routing profiles are hints, not authority; live
-tool failures and method-specific responses override stale cached data.
+Generated routing profiles are hints, not authority; live tool failures and
+method-specific responses override stale cached data.
 
 The MCP layer should preserve Clean Architecture boundaries: drivers such as
 git, ast-grep, and LSP subprocesses remain behind module gateways; use cases
@@ -81,8 +77,8 @@ The project should keep the following capabilities first-class:
 
 ## Routing Contracts
 
-Every user-visible route should be explicit about the path used and the fallback
-reason when degraded.
+Tools should record the selected path and fallback reason. User-facing responses
+keep routine routing internal and disclose only material degradation.
 
 - **Route decision:** use `capability_route` to make the first route explicit
   when semantic, structural, diagnostics, rename, or audit intent is unclear.
@@ -141,8 +137,8 @@ Validation should prove behavior, not only file presence.
 
 Required validation surfaces:
 
-- **Plugin structure:** manifest, skills, MCP registration, settings defaults,
-  settings schema, references, executable scripts, and hook manifest.
+- **Plugin structure:** manifest, explicit workflow skills, MCP registration,
+  settings defaults/schema, references, and executable scripts.
 - **MCP contract:** server startup, framed initialize, tool listing, stable tool
   schemas, clean unavailable responses, explicit route decisions, audit tools,
   and non-mutating preview tools.
@@ -155,9 +151,8 @@ Required validation surfaces:
   path-safety checks, clean shutdown, and explicit failure reasons.
 - **Init and doctor:** report generation, semantic idempotency, stale-profile
   detection, malformed-profile survival, and visible fallback recommendations.
-- **Hooks:** one short prompt-time input/output nudge, no lifecycle reminder
-  spam, no blocking of `rg`/`grep` or normal edits, and safe behavior when no
-  routing profile exists.
+- **Implicit routing:** MCP initialize guidance stays concise and silent, while
+  workflow skills remain explicit-only.
 - **Behavior scenarios:** executable route tests for route decision, definition
   lookup, references, rename preview, structural rewrite preview, rule-based
   AST audit, post-edit audit, unsupported language fallback, missing `ast-grep`,
@@ -170,10 +165,10 @@ when they can be kept deterministic and dependency-light.
 ## Development Principles
 
 - Prefer real tool responses over cached profiles.
-- Keep fallback reporting visible in both tools and documentation.
+- Keep fallback reporting visible in tools and documentation; keep routine routing out of user-facing narration.
 - Treat `ast-grep` as the canonical executable name.
 - Preserve standalone operation; avoid coupling the plugin to one workflow style.
-- Keep hooks short, deterministic, prompt-time only, and optional.
+- Do not ship hooks for routing; use concise MCP instructions and tool metadata.
 - Use explicit MCP audit tools instead of repeated lifecycle reminders.
 - Keep preview tools honest: distinguish executable edits from match-only
   candidates, and never imply a replacement is safe unless the substituted output
@@ -187,10 +182,9 @@ when they can be kept deterministic and dependency-light.
 
 ### 1. Low-Noise OMO-Style Operation
 
-Move repeated lifecycle guidance out of hooks and into explicit MCP tools and
-skill workflows. Prompt-time hooks may help discovery, but route decisions,
-rule scans, and post-edit audits should be actual tool calls with structured
-results and fallback reasons.
+Keep everyday routing in concise MCP instructions and tool metadata. Route
+decisions, rule scans, and post-edit audits should be actual tool calls with
+structured results and fallback reasons; workflow skills remain explicit-only.
 
 ### 2. Reliability Before Breadth
 

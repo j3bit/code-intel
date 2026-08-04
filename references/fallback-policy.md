@@ -1,8 +1,8 @@
 # Fallback Policy
 
-Fallback must be explicit and non-blocking.
+Fallback must be recorded in tool results and remain non-blocking. Routine fallback stays internal unless it materially affects the user-visible result or the user asks for diagnostics.
 
-Required missing `ast-grep` message:
+Required missing `ast-grep` diagnostic when disclosure is warranted:
 
 ```text
 Fallback reason: ast-grep executable was not found on PATH.
