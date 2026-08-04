@@ -13,6 +13,14 @@ Use `code-intel` when the user asks for code structure, symbols, definitions, re
 
 Fallback is not failure. Do not narrate a routine fallback. Surface it briefly in the final response only when the lower confidence or reduced coverage matters to the user, or when the user asks for diagnostics.
 
+## Routing profile scope
+
+Resolve the relevant language from the explicit request or target file before
+reading `docs/code-intel/routing-profile.json`. Inspect only top-level freshness
+metadata and `languages.<relevant-language>`. For a multi-language task, inspect
+only the language entries in scope; do not load the complete profile into model
+context.
+
 ## Behavior scenario routes
 
 - Route decision: use `capability_route` with intent `semantic`, `structural`, `diagnostics`, `rename`, or `audit`.

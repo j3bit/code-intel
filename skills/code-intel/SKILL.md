@@ -9,17 +9,18 @@ Use this skill for codebase questions involving declarations, patterns, API usag
 
 ## Routing
 
-1. Check `docs/code-intel/routing-profile.json` when present.
-2. Treat the profile as a cache, not authority. If it is missing, stale, or contradicted by live tool failures, use live discovery and suggest `init-code-intel`.
-3. Use `capability_route` for explicit route decisions when the route is not obvious.
-4. Prefer LSP tools for semantic navigation and diagnostics only when the tool response verifies the method; a detected command alone is degraded evidence.
-5. Prefer `ast_grep_search` for structural patterns when the effective code-intel settings define an ast-grep language id.
-6. Prefer `ast_grep_scan` for configured rule-based AST audits when `astGrep.configPath` is set.
-7. Use `post_edit_audit` after code edits when diagnostics or audit evidence is needed before final response.
-8. Use `lsp_hover`, `lsp_completion`, and `lsp_semantic_tokens` only when their responses verify the method.
-9. Use `lsp_formatting_preview` for formatting proposals; it must not mutate files.
-10. Use `rg`/`grep` fallback for strings, filenames, logs, generated files, unsupported languages, missing tools, or inconclusive code-intel output.
-11. Keep routine route selection and successful fallback internal.
+1. Determine the relevant language from the explicit request or target file.
+2. When `docs/code-intel/routing-profile.json` is present, inspect only its top-level freshness fields and `languages.<relevant-language>`. For multi-language tasks, inspect only the languages in scope; do not load unrelated language entries.
+3. Treat the profile as a cache, not authority. If it is missing, stale, or contradicted by live tool failures, use live discovery and suggest `init-code-intel`.
+4. Use `capability_route` for explicit route decisions when the route is not obvious.
+5. Prefer LSP tools for semantic navigation and diagnostics only when the tool response verifies the method; a detected command alone is degraded evidence.
+6. Prefer `ast_grep_search` for structural patterns when the effective code-intel settings define an ast-grep language id.
+7. Prefer `ast_grep_scan` for configured rule-based AST audits when `astGrep.configPath` is set.
+8. Use `post_edit_audit` after code edits when diagnostics or audit evidence is needed before final response.
+9. Use `lsp_hover`, `lsp_completion`, and `lsp_semantic_tokens` only when their responses verify the method.
+10. Use `lsp_formatting_preview` for formatting proposals; it must not mutate files.
+11. Use `rg`/`grep` fallback for strings, filenames, logs, generated files, unsupported languages, missing tools, or inconclusive code-intel output.
+12. Keep routine route selection and successful fallback internal.
 
 ## Communication
 

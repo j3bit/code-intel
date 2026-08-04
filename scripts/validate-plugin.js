@@ -3376,6 +3376,12 @@ check(
     /materially (reduces|affects)/i.test(coreSkillSource),
   coreSkillSource.slice(0, 1200)
 );
+check(
+  'code-intel skill scopes routing profile reads to the relevant language',
+  coreSkillSource.includes('languages.<relevant-language>') &&
+    /do not load unrelated language entries/i.test(coreSkillSource),
+  coreSkillSource.slice(0, 1200)
+);
 const splitFrame = await new Promise((resolve) => {
   const child = spawn(process.execPath, ['mcp/code-intel-server/index.js'], {
     cwd: ROOT,
