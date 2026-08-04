@@ -700,6 +700,85 @@ printf '%s\n' \
 } finally {
   fs.rmSync(pagedAstRoot, { recursive: true, force: true });
 }
+const boundedAstRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-bounded-ast-'));
+try {
+  const boundedAstBin = path.join(boundedAstRoot, 'bin');
+  const boundedAstRepo = path.join(boundedAstRoot, 'repo');
+  const boundedAstSettings = path.join(boundedAstRoot, 'settings.json');
+  const boundedAstRows = path.join(boundedAstRoot, 'rows.jsonl');
+  fs.mkdirSync(boundedAstBin, { recursive: true });
+  fs.mkdirSync(boundedAstRepo, { recursive: true });
+  fs.writeFileSync(
+    boundedAstRows,
+    Array.from({ length: 30 }, (_, index) => JSON.stringify({
+      file: `large-${index + 1}.py`,
+      text: `call(${index + 1}) ${'x'.repeat(12000)}`,
+      language: 'Python'
+    })).join('\n') + '\n'
+  );
+  const fakeAstGrep = path.join(boundedAstBin, 'ast-grep');
+  fs.writeFileSync(fakeAstGrep, `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--version" ]; then
+    echo "ast-grep fake-bounded"
+    exit 0
+  fi
+done
+/bin/cat "${boundedAstRows}"
+`);
+  fs.chmodSync(fakeAstGrep, 0o755);
+  writeJson(boundedAstSettings, {
+    version: 1,
+    path: { extraDirs: [boundedAstBin] },
+    astGrep: { command: 'ast-grep' }
+  });
+  const boundedAstEnv = {
+    ...process.env,
+    PATH: boundedAstBin,
+    CODE_INTEL_USER_SETTINGS_PATH: path.join(boundedAstRoot, 'missing-user-settings.json'),
+    CODE_INTEL_PROJECT_SETTINGS_PATH: boundedAstSettings
+  };
+  const defaultProbe = runToolProbe('ast_grep_search', {
+    repoRoot: boundedAstRepo,
+    language: 'python',
+    pattern: 'call($A)'
+  }, boundedAstEnv);
+  const defaultPage = defaultProbe.output;
+  check(
+    'ast-grep search defaults to a ten-result page with bounded snippets',
+    defaultProbe.processResult.status === 0 &&
+      defaultPage.status === 'ok' &&
+      defaultPage.pageSize === 10 &&
+      defaultPage.returnedItems > 0 &&
+      defaultPage.returnedItems <= 10 &&
+      defaultPage.results.every((row) =>
+        row.matchTruncated === true && Buffer.byteLength(row.match, 'utf8') <= 2048
+      ),
+    JSON.stringify(defaultPage).slice(0, 2000)
+  );
+  const wideProbe = runToolProbe('ast_grep_search', {
+    repoRoot: boundedAstRepo,
+    language: 'python',
+    pattern: 'call($A)',
+    pageSize: 100
+  }, boundedAstEnv);
+  const widePage = wideProbe.output;
+  check(
+    'ast-grep search enforces a 24 KiB response cap before the item cap',
+    wideProbe.processResult.status === 0 &&
+      widePage.status === 'ok' &&
+      widePage.returnedItems > 0 &&
+      widePage.returnedItems < 30 &&
+      widePage.pageLimitedByBytes === true &&
+      typeof widePage.nextCursor === 'string' &&
+      widePage.responseByteLimit === 24 * 1024 &&
+      widePage.responseBytes === Buffer.byteLength(JSON.stringify(widePage), 'utf8') &&
+      widePage.responseBytes <= widePage.responseByteLimit,
+    JSON.stringify(widePage).slice(0, 2000)
+  );
+} finally {
+  fs.rmSync(boundedAstRoot, { recursive: true, force: true });
+}
 const missingLsp = callTool('lsp_find_references', { repoRoot: ROOT, language: 'json', file: 'package.json', position: { line: 0, character: 0 } });
 check('LSP tool reports unavailable cleanly when no server declared', missingLsp.status === 'unavailable' && missingLsp.fallbackReason, JSON.stringify(missingLsp));
 const emptyToolPathRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-empty-path-'));
@@ -2749,9 +2828,10 @@ check(
       previewResult.mutated === false &&
       previewResult.mode === 'match-only' &&
       previewResult.manualEditRequired === true &&
+      previewResult.replacementTemplate &&
       (previewResult.patchCandidates || []).every((candidate) =>
         !Object.prototype.hasOwnProperty.call(candidate, 'after') &&
-        candidate.replacementTemplate
+        !Object.prototype.hasOwnProperty.call(candidate, 'replacementTemplate')
       )),
   JSON.stringify(previewResult).slice(0, 800)
 );

@@ -9,8 +9,10 @@ import { resolveRepoRelativePaths } from './repo.js';
 
 const SEARCH_RESULTS_DIR = path.join(os.tmpdir(), 'code-intel-ast-results-v1');
 const SEARCH_RESULT_TTL_MS = 60 * 60 * 1000;
-const DEFAULT_PAGE_SIZE = 20;
+const DEFAULT_PAGE_SIZE = 10;
 const MAX_PAGE_SIZE = 100;
+const MAX_RESPONSE_BYTES = 24 * 1024;
+const MAX_SNIPPET_BYTES = 2048;
 
 export function astUnavailable(language, reason = 'ast-grep executable was not found on PATH', settings = null) {
   return {
@@ -41,12 +43,37 @@ export function normalizeAstGrepJson(stdout, language = null) {
 }
 
 function normalizeAstGrepItem(item, language = null) {
-  return {
+  const rawMatch = item.text || item.lines || item.match || item.source || null;
+  const snippet = boundedUtf8(rawMatch, MAX_SNIPPET_BYTES);
+  const normalized = {
     file: item.file || item.path || item.filePath || null,
     range: item.range || item.metaVariables?.single?.range || null,
-    match: item.text || item.lines || item.match || item.source || null,
+    match: snippet.text,
     language: item.language || language,
     confidence: 'ast-grep'
+  };
+  if (snippet.truncated) {
+    normalized.matchBytes = snippet.originalBytes;
+    normalized.matchTruncated = true;
+  }
+  return normalized;
+}
+
+function boundedUtf8(value, maxBytes) {
+  if (value === null || value === undefined) {
+    return { text: null, originalBytes: 0, truncated: false };
+  }
+  const text = typeof value === 'string' ? value : JSON.stringify(value);
+  const buffer = Buffer.from(text, 'utf8');
+  if (buffer.length <= maxBytes) {
+    return { text, originalBytes: buffer.length, truncated: false };
+  }
+  let end = maxBytes;
+  while (end > 0 && (buffer[end] & 0xc0) === 0x80) end -= 1;
+  return {
+    text: buffer.subarray(0, end).toString('utf8'),
+    originalBytes: buffer.length,
+    truncated: true
   };
 }
 
@@ -163,34 +190,58 @@ function collectResultPage(file, language, offset, pageSize, countAll = false) {
   return { results, seen };
 }
 
+function withResponseBytes(value) {
+  const sized = { ...value, responseBytes: 0 };
+  for (let attempts = 0; attempts < 4; attempts += 1) {
+    const bytes = Buffer.byteLength(JSON.stringify(sized), 'utf8');
+    if (bytes === sized.responseBytes) return sized;
+    sized.responseBytes = bytes;
+  }
+  return sized;
+}
+
+function fitResponseRows(rows, build) {
+  let limited = rows;
+  while (true) {
+    const value = withResponseBytes(build(limited, limited.length < rows.length));
+    if (value.responseBytes <= MAX_RESPONSE_BYTES || limited.length <= 1) return value;
+    limited = limited.slice(0, -1);
+  }
+}
+
 function pagedSearchResult(metadata, offset, pageSize, results, fallback) {
-  const nextOffset = offset + results.length;
-  const nextCursor = nextOffset < metadata.totalItems
-    ? encodeCursor(metadata.id, nextOffset)
-    : null;
-  return {
-    status: 'ok',
-    complete: true,
-    resultSetId: metadata.id,
-    generatedAt: metadata.generatedAt,
-    expiresAt: metadata.expiresAt,
-    executable: metadata.executable,
-    configPath: metadata.configPath,
-    resolvedCommand: metadata.resolvedCommand,
-    language: metadata.language,
-    astGrepLanguageId: metadata.astGrepLanguageId,
-    patternSummary: metadata.pattern.slice(0, 120),
-    pageOffset: offset,
-    pageSize,
-    pageComplete: nextCursor === null,
-    totalItems: metadata.totalItems,
-    returnedItems: results.length,
-    truncated: metadata.totalItems > results.length,
-    nextCursor,
-    results,
-    fallback: metadata.totalItems ? [] : fallback,
-    fallbackReason: metadata.totalItems ? null : 'ast-grep returned no matches; text supplement may be useful'
-  };
+  return fitResponseRows(results, (limited, pageLimitedByBytes) => {
+    const nextOffset = offset + limited.length;
+    const nextCursor = nextOffset < metadata.totalItems
+      ? encodeCursor(metadata.id, nextOffset)
+      : null;
+    return {
+      status: 'ok',
+      complete: true,
+      resultSetId: metadata.id,
+      generatedAt: metadata.generatedAt,
+      expiresAt: metadata.expiresAt,
+      executable: metadata.executable,
+      configPath: metadata.configPath,
+      resolvedCommand: metadata.resolvedCommand,
+      language: metadata.language,
+      astGrepLanguageId: metadata.astGrepLanguageId,
+      patternSummary: metadata.pattern.slice(0, 120),
+      pageOffset: offset,
+      pageSize,
+      pageComplete: nextCursor === null,
+      pageLimitedByBytes,
+      responseByteLimit: MAX_RESPONSE_BYTES,
+      snippetByteLimit: MAX_SNIPPET_BYTES,
+      totalItems: metadata.totalItems,
+      returnedItems: limited.length,
+      truncated: metadata.totalItems > limited.length,
+      nextCursor,
+      results: limited,
+      fallback: metadata.totalItems ? [] : fallback,
+      fallbackReason: metadata.totalItems ? null : 'ast-grep returned no matches; text supplement may be useful'
+    };
+  });
 }
 
 function pageFromCursor(args, repoRoot, language, astGrepLanguageId, fallback) {
@@ -382,27 +433,48 @@ export function astGrepReplacePreview(args = {}) {
   const search = astGrepSearch(args);
   if (search.status !== 'ok') return { ...search, previewOnly: true, mutated: false };
   const replacement = args.replacement ?? '';
-  return {
-    status: 'ok',
-    previewOnly: true,
-    mutated: false,
-    mode: 'match-only',
-    replacementSummary: String(replacement).slice(0, 120),
-    manualEditRequired: true,
-    note: 'Match-only preview: replacement templates are not expanded by this MVP tool. Apply edits through normal Codex file editing after reviewing candidates.',
-    patchCandidates: search.results.map((r) => ({ file: r.file, range: r.range, before: r.match, replacementTemplate: replacement, confidence: r.confidence, mode: 'match-only' })),
-    complete: search.complete,
-    resultSetId: search.resultSetId,
-    generatedAt: search.generatedAt,
-    expiresAt: search.expiresAt,
-    pageOffset: search.pageOffset,
-    pageSize: search.pageSize,
-    pageComplete: search.pageComplete,
-    totalItems: search.totalItems,
-    returnedItems: search.returnedItems,
-    truncated: search.truncated,
-    nextCursor: search.nextCursor,
-    fallback: search.fallback,
-    fallbackReason: search.fallbackReason
-  };
+  const replacementSnippet = boundedUtf8(String(replacement), MAX_SNIPPET_BYTES);
+  const candidates = search.results.map((result) => ({
+    file: result.file,
+    range: result.range,
+    before: result.match,
+    beforeBytes: result.matchBytes,
+    beforeTruncated: result.matchTruncated,
+    confidence: result.confidence,
+    mode: 'match-only'
+  }));
+  return fitResponseRows(candidates, (limited, locallyLimitedByBytes) => {
+    const nextOffset = search.pageOffset + limited.length;
+    const nextCursor = nextOffset < search.totalItems
+      ? encodeCursor(search.resultSetId, nextOffset)
+      : null;
+    return {
+      status: 'ok',
+      previewOnly: true,
+      mutated: false,
+      mode: 'match-only',
+      replacementTemplate: replacementSnippet.text,
+      replacementBytes: replacementSnippet.originalBytes,
+      replacementTruncated: replacementSnippet.truncated,
+      manualEditRequired: true,
+      note: 'Match-only preview: replacement templates are not expanded by this MVP tool. Apply edits through normal Codex file editing after reviewing candidates.',
+      patchCandidates: limited,
+      complete: search.complete,
+      resultSetId: search.resultSetId,
+      generatedAt: search.generatedAt,
+      expiresAt: search.expiresAt,
+      pageOffset: search.pageOffset,
+      pageSize: search.pageSize,
+      pageComplete: nextCursor === null,
+      pageLimitedByBytes: search.pageLimitedByBytes || locallyLimitedByBytes,
+      responseByteLimit: MAX_RESPONSE_BYTES,
+      snippetByteLimit: MAX_SNIPPET_BYTES,
+      totalItems: search.totalItems,
+      returnedItems: limited.length,
+      truncated: search.totalItems > limited.length,
+      nextCursor,
+      fallback: search.fallback,
+      fallbackReason: search.fallbackReason
+    };
+  });
 }

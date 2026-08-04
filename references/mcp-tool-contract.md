@@ -31,4 +31,8 @@ the limit above 1000. Formatting returns only `TextEdit` preview data with
 returns a bounded page. Callers continue with the opaque `nextCursor` and the
 same repository, language, and pattern. `complete: true` means the stored result
 set is exhaustive; `pageComplete: true` means the current page is the last page.
+The default `pageSize` is 10. Each response is capped at 24 KiB and each match
+snippet at 2 KiB, so a page may contain fewer requested items without losing
+later matches from the stored result set. `responseBytes`, `responseByteLimit`,
+`snippetByteLimit`, and `pageLimitedByBytes` make these bounds explicit.
 `maxResults` remains a deprecated alias for `pageSize`.

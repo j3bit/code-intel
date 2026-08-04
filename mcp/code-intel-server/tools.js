@@ -130,7 +130,7 @@ export const commonProps = {
   language: { type: 'string', description: 'Language id such as typescript or python.' },
   file: { type: 'string', description: 'Repo-relative file path for LSP-oriented operations.' },
   position: { type: 'object', description: 'Zero-based LSP position {line, character}.' },
-  pageSize: { type: 'number', description: 'Results returned per page; defaults to 20 and is capped at 100.' },
+  pageSize: { type: 'number', description: 'Results requested per page; defaults to 10 and is capped at 100. The response byte limit may return fewer.' },
   cursor: { type: 'string', description: 'Opaque cursor from a previous page of the same search.' }
 };
 
