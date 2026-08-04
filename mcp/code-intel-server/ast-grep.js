@@ -13,6 +13,8 @@ const DEFAULT_PAGE_SIZE = 10;
 const MAX_PAGE_SIZE = 100;
 const MAX_RESPONSE_BYTES = 24 * 1024;
 const MAX_SNIPPET_BYTES = 2048;
+const DEFAULT_SCAN_RESULTS = 100;
+const MAX_SCAN_RESULTS = 1000;
 
 export function astUnavailable(language, reason = 'ast-grep executable was not found on PATH', settings = null) {
   return {
@@ -81,6 +83,12 @@ function boundedPageSize(value) {
   const parsed = Number(value ?? DEFAULT_PAGE_SIZE);
   if (!Number.isFinite(parsed)) return DEFAULT_PAGE_SIZE;
   return Math.max(1, Math.min(Math.floor(parsed), MAX_PAGE_SIZE));
+}
+
+function boundedScanResults(value) {
+  const parsed = Number(value ?? DEFAULT_SCAN_RESULTS);
+  if (!Number.isFinite(parsed)) return DEFAULT_SCAN_RESULTS;
+  return Math.max(1, Math.min(Math.floor(parsed), MAX_SCAN_RESULTS));
 }
 
 function resultSetFiles(id) {
@@ -414,15 +422,21 @@ export function astGrepScan(args = {}) {
       commandPolicy: 'this plugin does not call sg'
     };
   }
-  let results = [];
-  try { results = normalizeAstGrepScanJson(result.stdout).slice(0, args.maxResults || 100); }
+  let allResults = [];
+  try { allResults = normalizeAstGrepScanJson(result.stdout); }
   catch (error) { return { status: 'error', error: `failed to parse ast-grep scan JSON: ${error.message}`, raw: result.stdout.slice(0, 1000), results: [], fallback: settings.fallback, configPath }; }
+  const maxResults = boundedScanResults(args.maxResults);
+  const results = allResults.slice(0, maxResults);
   return {
     status: 'ok',
     executable: settings.astGrep.command,
     configPath,
     resolvedCommand: ast.resolvedCommand,
     scanned: scanTargets,
+    totalItems: allResults.length,
+    returnedItems: results.length,
+    maxResults,
+    truncated: allResults.length > results.length,
     results,
     fallback: results.length ? [] : settings.fallback,
     fallbackReason: results.length ? null : 'ast-grep scan returned no findings'

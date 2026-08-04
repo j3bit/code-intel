@@ -42,6 +42,22 @@ function mapResult(result, mapper) {
     : mapper(result);
 }
 
+function withCollectionMetadata(result) {
+  if (result?.status !== 'ok') return result;
+  const items = Array.isArray(result.result)
+    ? result.result
+    : Array.isArray(result.result?.items)
+      ? result.result.items
+      : null;
+  if (!items) return result;
+  return {
+    ...result,
+    totalItems: items.length,
+    returnedItems: items.length,
+    truncated: false
+  };
+}
+
 function boundedLimit(value, fallback = 200) {
   const parsed = Number(value ?? fallback);
   if (!Number.isFinite(parsed)) return fallback;
@@ -102,10 +118,10 @@ export function callTool(name, args = {}, runtime = {}) {
     case 'ast_grep_scan': return astGrepScan(args);
     case 'ast_grep_replace_preview': return astGrepReplacePreview(args);
     case 'post_edit_audit': return postEditAudit(args, runtime);
-    case 'lsp_diagnostics': return callLspTool(runtime, 'textDocument/diagnostic', args);
-    case 'lsp_symbols': return callLspTool(runtime, 'textDocument/documentSymbol', args);
-    case 'lsp_goto_definition': return callLspTool(runtime, 'textDocument/definition', args);
-    case 'lsp_find_references': return callLspTool(runtime, 'textDocument/references', args);
+    case 'lsp_diagnostics': return mapResult(callLspTool(runtime, 'textDocument/diagnostic', args), withCollectionMetadata);
+    case 'lsp_symbols': return mapResult(callLspTool(runtime, 'textDocument/documentSymbol', args), withCollectionMetadata);
+    case 'lsp_goto_definition': return mapResult(callLspTool(runtime, 'textDocument/definition', args), withCollectionMetadata);
+    case 'lsp_find_references': return mapResult(callLspTool(runtime, 'textDocument/references', args), withCollectionMetadata);
     case 'lsp_prepare_rename': return callLspTool(runtime, 'textDocument/prepareRename', args);
     case 'lsp_rename_preview': return renamePreview(callLspTool(runtime, 'textDocument/rename', args));
     case 'lsp_hover': return callLspTool(runtime, 'textDocument/hover', { ...args, requireAdvertisedCapability: true });
@@ -119,7 +135,7 @@ export function callTool(name, args = {}, runtime = {}) {
     );
     case 'lsp_formatting_preview': return mapResult(
       callLspTool(runtime, 'textDocument/formatting', { ...args, requireAdvertisedCapability: true }),
-      formattingPreview
+      (result) => withCollectionMetadata(formattingPreview(result))
     );
     default: throw new Error(`unknown tool: ${name}`);
   }
@@ -135,7 +151,21 @@ export const commonProps = {
 };
 
 export const tools = TOOL_NAMES.map((name) => {
-  const base = { name, description: '', inputSchema: { type: 'object', properties: {}, additionalProperties: true }, outputSchema: { type: 'object', properties: { status: { type: 'string' }, fallbackReason: { type: ['string', 'null'] } } } };
+  const base = {
+    name,
+    description: '',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: true },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        status: { type: 'string' },
+        fallbackReason: { type: ['string', 'null'] },
+        totalItems: { type: 'integer' },
+        returnedItems: { type: 'integer' },
+        truncated: { type: 'boolean' }
+      }
+    }
+  };
   if (name === 'capability_discover') {
     base.description = 'Discover code-intel capabilities, language inventory, ast-grep availability, LSP command candidates, and fallback reasons.';
     base.inputSchema.properties = { repoRoot: commonProps.repoRoot };

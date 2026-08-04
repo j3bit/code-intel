@@ -27,6 +27,11 @@ before sending a method request. Completion and semantic-token results report
 the limit above 1000. Formatting returns only `TextEdit` preview data with
 `previewOnly: true` and `mutated: false`.
 
+Every collection-producing AST or LSP response reports `totalItems`,
+`returnedItems`, and `truncated`. Unbounded LSP collections report
+`truncated: false`; bounded AST scan, completion, semantic-token, search,
+replacement-preview, and audit responses preserve the pre-limit total.
+
 `ast_grep_search` runs the complete search into an expiring local result set and
 returns a bounded page. Callers continue with the opaque `nextCursor` and the
 same repository, language, and pattern. `complete: true` means the stored result

@@ -860,7 +860,7 @@ for arg in "$@"; do
     exit 0
   fi
 done
-printf '%s\n' '[{"file":"src/main.ts","ruleId":"local.no-console","message":"console.log found","severity":"warning"}]'
+printf '%s\n' '[{"file":"src/main.ts","ruleId":"local.no-console","message":"console.log found","severity":"warning"},{"file":"src/main.ts","ruleId":"local.second","message":"second finding","severity":"warning"},{"file":"src/main.ts","ruleId":"local.third","message":"third finding","severity":"info"}]'
 `);
   fs.chmodSync(fakeScanAstGrep, 0o755);
   fs.mkdirSync(path.join(scanRoot, '.code-intel'), { recursive: true });
@@ -878,7 +878,7 @@ printf '%s\n' '[{"file":"src/main.ts","ruleId":"local.no-console","message":"con
   try {
     process.env.CODE_INTEL_USER_SETTINGS_PATH = path.join(scanRoot, 'missing-user-settings.json');
     process.env.CODE_INTEL_PROJECT_SETTINGS_PATH = scanSettingsPath;
-    try { scanResult = callTool('ast_grep_scan', { repoRoot: scanRoot, paths: ['src/main.ts'], maxResults: 5 }); }
+    try { scanResult = callTool('ast_grep_scan', { repoRoot: scanRoot, paths: ['src/main.ts'], maxResults: 2 }); }
     catch (error) { scanResult = { status: 'error', fallbackReason: error.message, results: [] }; }
     try { unsafeScanResult = callTool('ast_grep_scan', { repoRoot: scanRoot, paths: [path.join(scanRoot, 'src', 'main.ts')] }); }
     catch (error) { unsafeScanResult = { status: 'error', fallbackReason: error.message, results: [] }; }
@@ -893,6 +893,9 @@ printf '%s\n' '[{"file":"src/main.ts","ruleId":"local.no-console","message":"con
   const scanOk = scanResult.status === 'ok' &&
     scanResult.configPath === path.join(scanRoot, 'sgconfig.yml') &&
     scanResult.resolvedCommand === fakeScanAstGrep &&
+    scanResult.totalItems === 3 &&
+    scanResult.returnedItems === 2 &&
+    scanResult.truncated === true &&
     scanResult.results.some((row) => row.ruleId === 'local.no-console' && row.file && row.file.endsWith('src/main.ts'));
   check('ast_grep_scan executes configured rule scan when available', scanOk, JSON.stringify(scanResult).slice(0, 1000));
   check(
@@ -1452,6 +1455,9 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
       args: {},
       matches: (output) =>
         output.result?.length === 3 &&
+        output.totalItems === 3 &&
+        output.returnedItems === 3 &&
+        output.truncated === false &&
         output.result[0]?.name === 'Calculator' &&
         output.result[0]?.children?.[0]?.name === 'add' &&
         sameJson(output.result[1]?.selectionRange, lspRange(6, 16, 6, 19)) &&
@@ -1465,6 +1471,9 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
       args: { position: fixturePosition },
       matches: (output) =>
         output.result?.length === 1 &&
+        output.totalItems === 1 &&
+        output.returnedItems === 1 &&
+        output.truncated === false &&
         output.result[0]?.uri === fixtureUri &&
         sameJson(output.result[0]?.range, lspRange(6, 16, 6, 19))
     },
@@ -1476,6 +1485,9 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
       args: { position: fixturePosition },
       matches: (output) =>
         output.result?.length === 2 &&
+        output.totalItems === 2 &&
+        output.returnedItems === 2 &&
+        output.truncated === false &&
         output.result.every((reference) => reference.uri === fixtureUri) &&
         sameJson(output.result[0]?.range, lspRange(6, 16, 6, 19)) &&
         sameJson(output.result[1]?.range, lspRange(10, 14, 10, 17))
@@ -1553,6 +1565,9 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
         output.previewOnly === true &&
         output.mutated === false &&
         output.result?.length === 1 &&
+        output.totalItems === 1 &&
+        output.returnedItems === 1 &&
+        output.truncated === false &&
         output.result[0]?.newText === '// formatted preview\n'
     },
     {
@@ -1564,6 +1579,9 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
       matches: (output) =>
         output.result?.kind === 'full' &&
         output.result?.items?.length === 1 &&
+        output.totalItems === 1 &&
+        output.returnedItems === 1 &&
+        output.truncated === false &&
         output.result.items[0]?.code === 'fixture-warning' &&
         output.result.items[0]?.message === 'fixture diagnostic' &&
         sameJson(output.result.items[0]?.range, lspRange(11, 0, 11, 19))

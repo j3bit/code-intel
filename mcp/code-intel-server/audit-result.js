@@ -10,6 +10,9 @@ export function formatPostEditAuditResult({
 }) {
   const scan = astGrepScan || { status: 'unavailable', results: [], fallbackReason: 'audit did not request ast-grep scan' };
   const astGrepFindingCount = Array.isArray(scan.results) ? scan.results.length : 0;
+  const astGrepTotalItems = Number.isInteger(scan.totalItems)
+    ? scan.totalItems
+    : astGrepFindingCount;
   const lspDiagnosticFindingCount = diagnostics.reduce((count, row) => {
     const result = row?.result;
     if (Array.isArray(result?.items)) return count + result.items.length;
@@ -17,6 +20,7 @@ export function formatPostEditAuditResult({
     return count;
   }, 0);
   const findingCount = astGrepFindingCount + lspDiagnosticFindingCount;
+  const totalItems = astGrepTotalItems + lspDiagnosticFindingCount;
   const hasFindings = findingCount > 0;
   const degraded = diagnostics.some((row) => row.status !== 'ok') || scan.status !== 'ok' || hasFindings;
   return {
@@ -26,6 +30,9 @@ export function formatPostEditAuditResult({
     fileSource,
     fileSourceFallbackReason,
     findingCount,
+    totalItems,
+    returnedItems: findingCount,
+    truncated: totalItems > findingCount,
     hasFindings,
     astGrepFindingCount,
     lspDiagnosticFindingCount,
