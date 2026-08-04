@@ -1,6 +1,6 @@
 {
   "name": "code-intel",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Language-aware code intelligence for Codex: AST search, LSP navigation, preview-only refactors, and explicit fallback routing.",
   "author": {
     "name": "Local"

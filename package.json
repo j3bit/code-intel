@@ -1,6 +1,6 @@
 {
   "name": "code-intel",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Standalone Codex plugin for AST/LSP code intelligence with graceful fallback.",
   "type": "module",
   "private": true,

@@ -3,7 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
-export const PLUGIN_VERSION = '0.2.0';
+export const PLUGIN_VERSION = '0.3.0';
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 export const DEFAULT_SETTINGS_PATH = path.join(ROOT, 'settings', 'defaults.json');
 export const SETTINGS_SCHEMA_PATH = path.join(ROOT, 'settings', 'schema.json');
