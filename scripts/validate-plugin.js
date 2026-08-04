@@ -597,7 +597,24 @@ for (const [pattern, reason] of forbiddenCorePatterns) {
 
 for (const tool of tools) check(`tool ${tool.name} schema`, Boolean(tool.name && tool.description && tool.inputSchema && tool.outputSchema), tool.description);
 const discover = callTool('capability_discover', { repoRoot: ROOT });
-check('capability_discover works', Boolean(discover.repoRoot && discover.settingsVersion === 1 && discover.tools?.astGrep?.command === 'ast-grep'), JSON.stringify({ repoRoot: discover.repoRoot, settingsVersion: discover.settingsVersion, astGrep: discover.tools?.astGrep?.command }));
+let discoverReport = {};
+try { discoverReport = JSON.parse(fs.readFileSync(discover.detailReportPath, 'utf8')); } catch {}
+check(
+  'capability_discover defaults to summary with detailed file report',
+  Boolean(
+    discover.repoRoot &&
+    discover.mode === 'summary' &&
+    discover.settingsVersion === 1 &&
+    discover.tools?.astGrep?.command === 'ast-grep' &&
+    Array.isArray(discover.languages) &&
+    !discover.inventory &&
+    discover.detailReportBytes > 0 &&
+    discoverReport.repoRoot === discover.repoRoot &&
+    discoverReport.languages
+  ),
+  JSON.stringify({ discover, reportKeys: Object.keys(discoverReport) }).slice(0, 2000)
+);
+if (discover.detailReportPath) fs.rmSync(discover.detailReportPath, { force: true });
 const routeSemantic = callTool('capability_route', { repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'), file: 'src/math.ts', intent: 'semantic' });
 check(
   'capability_route exposes semantic route decision',
@@ -934,7 +951,7 @@ printf '%s\n' '[{"file":"extra.py","text":"fake match","language":"Python"}]'
     astGrep: { command: 'ast-grep' }
   });
   const extraAstEnv = { ...process.env, PATH: emptyPathDir, CODE_INTEL_PROJECT_SETTINGS_PATH: astSettingsPath };
-  const extraAstDiscoveryProbe = run(process.execPath, ['mcp/code-intel-server/index.js', '--call-tool', 'capability_discover', '--args', JSON.stringify({ repoRoot: path.join(ROOT, 'fixtures/repos/python-basic') })], {
+  const extraAstDiscoveryProbe = run(process.execPath, ['mcp/code-intel-server/index.js', '--call-tool', 'capability_discover', '--args', JSON.stringify({ repoRoot: path.join(ROOT, 'fixtures/repos/python-basic'), mode: 'full' })], {
     env: extraAstEnv
   });
   const extraAstDiscovery = JSON.parse(extraAstDiscoveryProbe.stdout || '{}');
@@ -1006,7 +1023,7 @@ printf '%s\n' '[{"file":"extra.py","text":"fake relative match","language":"Pyth
     CODE_INTEL_USER_SETTINGS_PATH: path.join(relativeExtraPathAstRoot, 'missing-user-settings.json')
   };
   fs.mkdirSync(relativeAstEnv.PATH, { recursive: true });
-  const relativeAstDiscoveryProbe = run(process.execPath, [path.join(ROOT, 'mcp/code-intel-server/index.js'), '--call-tool', 'capability_discover', '--args', JSON.stringify({ repoRoot: targetRepo })], {
+  const relativeAstDiscoveryProbe = run(process.execPath, [path.join(ROOT, 'mcp/code-intel-server/index.js'), '--call-tool', 'capability_discover', '--args', JSON.stringify({ repoRoot: targetRepo, mode: 'full' })], {
     cwd: outsideCwd,
     env: relativeAstEnv
   });
@@ -1163,7 +1180,7 @@ echo "[]"
   };
   const languageRoutingDiscoveryProbe = runToolProbe(
     'capability_discover',
-    { repoRoot: languageRoutingRoot },
+    { repoRoot: languageRoutingRoot, mode: 'full' },
     languageRoutingEnv
   );
   const languageRoutingDiscovery = languageRoutingDiscoveryProbe.output;
@@ -1295,7 +1312,7 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
   const absolutePathOutput = JSON.parse(absolutePathProbe.stdout || '{}');
   check('LSP rejects repo path traversal before reading files', pathEscapeOutput.status === 'unavailable' && /escapes repo root|outside repo root/.test(pathEscapeOutput.fallbackReason || ''), pathEscapeProbe.stdout.slice(0, 500) || pathEscapeProbe.stderr.slice(0, 500));
   check('LSP rejects absolute file paths before reading files', absolutePathOutput.status === 'unavailable' && /repo-relative/.test(absolutePathOutput.fallbackReason || ''), absolutePathProbe.stdout.slice(0, 500) || absolutePathProbe.stderr.slice(0, 500));
-  const lspDiscoveryProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'capability_discover', '--args', JSON.stringify({ repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic') })], {
+  const lspDiscoveryProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'capability_discover', '--args', JSON.stringify({ repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'), mode: 'full' })], {
     env: fakeLspEnv
   });
   const lspDiscovery = JSON.parse(lspDiscoveryProbe.stdout || '{}');
@@ -1343,7 +1360,8 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
     CODE_INTEL_FAKE_PREPARE_RENAME: 'unsupported'
   };
   const structuredDiscoveryProbe = runToolProbe('capability_discover', {
-    repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic')
+    repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'),
+    mode: 'full'
   }, structuredEnv);
   const structuredInfo = structuredDiscoveryProbe.output.languages?.typescript;
   check(
@@ -2630,7 +2648,7 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
     CODE_INTEL_USER_SETTINGS_PATH: path.join(extraPathLspRoot, 'missing-user-settings.json'),
     CODE_INTEL_PROJECT_SETTINGS_PATH: path.join(extraPathLspRoot, 'missing-project-settings.json')
   };
-  const extraDiscoveryProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'capability_discover', '--args', JSON.stringify({ repoRoot: targetRepo })], {
+  const extraDiscoveryProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'capability_discover', '--args', JSON.stringify({ repoRoot: targetRepo, mode: 'full' })], {
     env: extraEnv
   });
   const extraDiscovery = JSON.parse(extraDiscoveryProbe.stdout || '{}');
@@ -2691,7 +2709,7 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
     CODE_INTEL_USER_SETTINGS_PATH: path.join(relativeLspRoot, 'missing-user-settings.json'),
     CODE_INTEL_PROJECT_SETTINGS_PATH: path.join(relativeLspRoot, 'missing-project-settings.json')
   };
-  const relativeDiscoveryProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'capability_discover', '--args', JSON.stringify({ repoRoot: targetRepo })], {
+  const relativeDiscoveryProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'capability_discover', '--args', JSON.stringify({ repoRoot: targetRepo, mode: 'full' })], {
     env: relativeEnv
   });
   const relativeDiscovery = JSON.parse(relativeDiscoveryProbe.stdout || '{}');
@@ -2753,7 +2771,7 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
     ...process.env,
     CODE_INTEL_USER_SETTINGS_PATH: path.join(relativeExtraPathLspRoot, 'missing-user-settings.json')
   };
-  const relativeExtraDiscoveryProbe = run(process.execPath, [path.join(ROOT, 'mcp/code-intel-server/index.js'), '--call-tool', 'capability_discover', '--args', JSON.stringify({ repoRoot: targetRepo })], {
+  const relativeExtraDiscoveryProbe = run(process.execPath, [path.join(ROOT, 'mcp/code-intel-server/index.js'), '--call-tool', 'capability_discover', '--args', JSON.stringify({ repoRoot: targetRepo, mode: 'full' })], {
     cwd: outsideCwd,
     env: relativeExtraEnv
   });

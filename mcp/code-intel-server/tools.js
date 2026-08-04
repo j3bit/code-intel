@@ -1,4 +1,4 @@
-import { discoverCapabilities, resolveCapabilityRoute } from './capabilities.js';
+import { discoverCapabilitiesForTool, resolveCapabilityRoute } from './capabilities.js';
 import { astGrepSearch, astGrepScan, astGrepReplacePreview } from './ast-grep.js';
 import { postEditAudit } from './audit.js';
 import { lspTool } from './lsp.js';
@@ -112,7 +112,7 @@ function formattingPreview(result) {
 
 export function callTool(name, args = {}, runtime = {}) {
   switch (name) {
-    case 'capability_discover': return discoverCapabilities(args.repoRoot || process.cwd());
+    case 'capability_discover': return discoverCapabilitiesForTool(args);
     case 'capability_route': return resolveCapabilityRoute(args);
     case 'ast_grep_search': return astGrepSearch(args);
     case 'ast_grep_scan': return astGrepScan(args);
@@ -167,8 +167,11 @@ export const tools = TOOL_NAMES.map((name) => {
     }
   };
   if (name === 'capability_discover') {
-    base.description = 'Discover code-intel capabilities, language inventory, ast-grep availability, LSP command candidates, and fallback reasons.';
-    base.inputSchema.properties = { repoRoot: commonProps.repoRoot };
+    base.description = 'Return a compact capability summary and a temporary detailed report path; use full mode only when inline details are required.';
+    base.inputSchema.properties = {
+      repoRoot: commonProps.repoRoot,
+      mode: { type: 'string', enum: ['summary', 'full'], description: 'Defaults to summary.' }
+    };
   } else if (name === 'capability_route') {
     base.description = 'Return the recommended code-intel route for semantic, structural, rename, diagnostics, or audit intent without mutating files.';
     base.inputSchema.properties = {

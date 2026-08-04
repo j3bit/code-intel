@@ -1,4 +1,6 @@
 import fs from 'node:fs';
+import crypto from 'node:crypto';
+import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
@@ -8,6 +10,10 @@ import {
   splitCommandLine
 } from './settings.js';
 import { walkFiles } from './repo.js';
+
+const CAPABILITY_REPORTS_DIR = path.join(os.tmpdir(), 'code-intel-capability-reports-v1');
+const CAPABILITY_REPORT_TTL_MS = 60 * 60 * 1000;
+const MAX_SUMMARY_LANGUAGES = 20;
 
 export function detectExecutable(command, args = ['--version']) {
   const result = spawnSync(command, args, { encoding: 'utf8', timeout: 3000 });
@@ -473,6 +479,83 @@ export function discoverCapabilities(repoRoot = process.cwd()) {
     },
     fallbackPolicy: ast.available ? 'Use rg/grep when AST or LSP is unsupported or inconclusive.' : 'Fallback reason: ast-grep executable was not found on PATH. Command policy: this plugin does not call sg.'
   };
+}
+
+function cleanupExpiredCapabilityReports(now = Date.now()) {
+  if (!fs.existsSync(CAPABILITY_REPORTS_DIR)) return;
+  for (const entry of fs.readdirSync(CAPABILITY_REPORTS_DIR)) {
+    if (!entry.endsWith('.json')) continue;
+    const reportPath = path.join(CAPABILITY_REPORTS_DIR, entry);
+    try {
+      if (fs.statSync(reportPath).mtimeMs + CAPABILITY_REPORT_TTL_MS <= now) {
+        fs.rmSync(reportPath, { force: true });
+      }
+    } catch {
+      fs.rmSync(reportPath, { force: true });
+    }
+  }
+}
+
+function writeCapabilityReport(discovery) {
+  fs.mkdirSync(CAPABILITY_REPORTS_DIR, { recursive: true, mode: 0o700 });
+  cleanupExpiredCapabilityReports();
+  const reportPath = path.join(CAPABILITY_REPORTS_DIR, `${crypto.randomUUID()}.json`);
+  const content = JSON.stringify(discovery, null, 2) + '\n';
+  fs.writeFileSync(reportPath, content, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  return {
+    path: reportPath,
+    bytes: Buffer.byteLength(content, 'utf8'),
+    expiresAt: new Date(Date.now() + CAPABILITY_REPORT_TTL_MS).toISOString()
+  };
+}
+
+function summarizeCapabilities(discovery, report) {
+  const detectedLanguages = Object.entries(discovery.languages)
+    .filter(([, info]) => info.presentFiles > 0)
+    .sort((left, right) =>
+      right[1].presentFiles - left[1].presentFiles || left[0].localeCompare(right[0])
+    )
+    .map(([language, info]) => ({
+      language,
+      presentFiles: info.presentFiles,
+      astGrep: info.astGrep,
+      lsp: info.lsp
+    }));
+  const languages = detectedLanguages.slice(0, MAX_SUMMARY_LANGUAGES);
+  return {
+    status: discovery.status,
+    mode: 'summary',
+    pluginVersion: discovery.pluginVersion,
+    settingsVersion: discovery.settingsVersion,
+    generatedAt: discovery.generatedAt,
+    repoRoot: discovery.repoRoot,
+    inventorySummary: {
+      totalFiles: discovery.inventory.totalFiles,
+      detectedLanguages: detectedLanguages.length,
+      unsupportedExtensions: Object.keys(discovery.inventory.unsupportedExtensions).length
+    },
+    totalItems: detectedLanguages.length,
+    returnedItems: languages.length,
+    truncated: detectedLanguages.length > languages.length,
+    languages,
+    tools: {
+      astGrep: {
+        command: discovery.tools.astGrep.command,
+        available: discovery.tools.astGrep.available,
+        configPath: discovery.tools.astGrep.configPath
+      }
+    },
+    detailReportPath: report.path,
+    detailReportBytes: report.bytes,
+    detailReportExpiresAt: report.expiresAt,
+    fallbackPolicy: discovery.fallbackPolicy
+  };
+}
+
+export function discoverCapabilitiesForTool(args = {}) {
+  const discovery = discoverCapabilities(args.repoRoot || process.cwd());
+  if (args.mode === 'full') return { ...discovery, mode: 'full' };
+  return summarizeCapabilities(discovery, writeCapabilityReport(discovery));
 }
 
 export function resolveCapabilityRoute(args = {}) {
