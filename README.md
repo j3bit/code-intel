@@ -1,24 +1,41 @@
-# Code Intel Codex Plugin
+# Code Intel
 
-`code-intel` is a standalone Codex plugin that makes language-aware code intelligence the preferred route for code tasks before falling back to text search.
+`code-intel` is a portable Codex, Claude Code, and OpenCode plugin bundle. It routes code search and navigation through AST/LSP capabilities before text fallback while keeping routine routing and successful fallback silent.
 
-The MVP ships:
+## What is shared
 
-- Explicit-invocation Codex skills for routing, initialization, doctor troubleshooting, and refactor gates.
-- A Node-based MCP server using only built-in Node modules.
-- Zero-config settings for AST/LSP capability discovery, with optional user and project overrides.
-- Silent MCP server guidance for implicit tool routing without skill-announcement or hook context.
-- Validation scripts and fixture repositories.
+- `skills/` contains the client-neutral Agent Skills core.
+- `mcp/code-intel-server/` contains the read-only, preview-oriented MCP server.
+- `settings/` and `references/` contain capability and policy contracts.
+- The repository root's `.agents/skills/` holds small OpenCode entry points that point back to these skills.
+- `.codex-plugin/`, `.claude-plugin/`, and `clients/` contain thin client integrations.
 
-## Hard MVP policies
+The plugin does not bundle or install `ast-grep` or language servers. Missing optional tools degrade to supported fallback behavior.
 
-- The plugin does **not** bundle `ast-grep` or language servers.
-- The plugin does **not** install dependencies automatically.
-- The AST command policy is `ast-grep` only; the Linux-conflicting shorthand is not used as a command path.
-- MCP tools are preview/read-only for repository contents and do not mutate files.
-- `rg`/`grep` fallback remains valid; disclose it only when it materially reduces coverage or confidence.
+## Claude Code
 
-## Quick checks
+Install from the parent marketplace:
+
+```sh
+claude plugin marketplace add j3bit/agent-plugins
+claude plugin install code-intel@j3bit-plugins
+```
+
+For local development, load this directory with Claude Code's `--plugin-dir` option. The Claude MCP configuration resolves its entry point through `${CLAUDE_PLUGIN_ROOT}`, so it does not depend on the caller's working directory.
+
+## OpenCode
+
+Expose the four folders under `skills/` through OpenCode's `.agents/skills`, `.claude/skills`, `.opencode/skills`, or configured skill catalog. The parent repository's `.agents/skills/` already contains entry points for them.
+
+Then merge the `mcp.code-intel` entry from `clients/opencode/opencode.example.json` into your OpenCode configuration and launch OpenCode with the plugin root available:
+
+```sh
+CODE_INTEL_PLUGIN_ROOT="$HOME/Dev/agent-plugins/plugins/code-intel" opencode
+```
+
+OpenCode does not have to start a separate native LSP integration. The code-intel MCP server owns its language-server sessions, avoiding duplicate servers and duplicate diagnostics.
+
+## Local checks
 
 ```sh
 node mcp/code-intel-server/index.js --list-tools
@@ -27,19 +44,4 @@ node scripts/doctor-code-intel.js --repo fixtures/repos/typescript-basic
 node scripts/validate-plugin.js
 ```
 
-Real language servers are exercised only by the opt-in matrix:
-
-```sh
-npm run integration:real
-```
-
-Missing optional servers are recorded as skips. If a configured executable is
-installed but its required protocol checks fail, the command exits non-zero and
-writes `artifacts/code-intel-integration-matrix.json` with executable paths,
-versions, per-method result hashes, and corpus provenance.
-
-For a user-local tcsh-lsp build that is not on `PATH`, set its command explicitly:
-
-```sh
-CODE_INTEL_TCSH_LSP_COMMAND=/absolute/path/to/tcsh-lsp npm run integration:real
-```
+Real language servers are exercised only by the opt-in `npm run integration:real` matrix. Preview tools never mutate repository files.

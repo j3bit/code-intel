@@ -1,0 +1,21 @@
+{
+  "name": "code-intel",
+  "displayName": "Code Intel",
+  "description": "Language-aware AST/LSP search, navigation, preview-only refactors, diagnostics, and explicit fallback routing.",
+  "version": "0.3.0",
+  "author": {
+    "name": "jeongsaebit"
+  },
+  "homepage": "https://github.com/j3bit/code-intel",
+  "repository": "https://github.com/j3bit/code-intel",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "code-intelligence",
+    "ast-grep",
+    "lsp",
+    "refactoring"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./clients/claude/mcp.json"
+}

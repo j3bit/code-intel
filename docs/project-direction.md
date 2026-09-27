@@ -3,7 +3,7 @@
 ## North Star
 
 `code-intel` exists to make language-aware code understanding the default path
-for Codex coding work, while remaining useful in plain Codex setups without any
+for Codex, Claude Code, and OpenCode work, while remaining useful without any
 larger orchestration layer. The project should give agents IDE-like confidence:
 structural search, symbol navigation, references, rename previews, rewrite
 previews, and post-edit diagnostics should be easy to discover, safe to run, and
@@ -17,7 +17,7 @@ reads, reasons about, and safely changes repositories.
 
 The plugin should remain standalone and behavior-first:
 
-- **Standalone Codex plugin:** skills and MCP tools must work without assuming
+- **Portable agent plugin:** skills and MCP tools must work without assuming
   any specific orchestration runtime.
 - **Silent implicit routing:** concise MCP server instructions and tool metadata
   guide ordinary code-intel use without invoking a workflow skill or hook.
@@ -30,7 +30,7 @@ The plugin should remain standalone and behavior-first:
 - **Graceful degradation:** missing AST or LSP support should produce explicit
   fallback reasons and keep `rg`/`grep` available.
 - **Preview before mutation:** MCP tools that imply edits should return previews
-  or candidates; file mutation stays in the normal Codex edit path.
+  or candidates; file mutation stays in the client's normal edit path.
 
 ## Operating Model
 

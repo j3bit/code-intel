@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This repository is the standalone `code-intel` Codex plugin. Core MCP logic lives in `mcp/code-intel-server/`, with the executable entrypoint in `index.js` and shared implementation in `core.js`. User-facing CLI workflows are in `scripts/` (`init`, `doctor`, `validate`). Explicit-invocation Codex skill instructions live under `skills/*/SKILL.md`; ordinary implicit routing comes from concise MCP server instructions and tool metadata. Language capability/settings data is in `settings/` (`settings/defaults.json` and `settings/schema.json`), policy contracts are in `references/`, and the maintained project direction lives in `docs/project-direction.md`. Historical design notes may be kept only as local ignored archives. Test fixtures are under `fixtures/repos/`, with fake LSP servers in `fixtures/lsp/`.
+This repository is the portable `code-intel` plugin for Codex, Claude Code, and OpenCode. Core MCP logic lives in `mcp/code-intel-server/`, with the executable entrypoint in `index.js` and shared implementation in `core.js`. User-facing CLI workflows are in `scripts/` (`init`, `doctor`, `validate`). Shared skill instructions live under `skills/*/SKILL.md`; client manifests and MCP configuration live in `.codex-plugin/`, `.claude-plugin/`, and `clients/`. Ordinary implicit routing comes from concise MCP server instructions and tool metadata. Language capability/settings data is in `settings/` (`settings/defaults.json` and `settings/schema.json`), policy contracts are in `references/`, and the maintained project direction lives in `docs/project-direction.md`. Historical design notes may be kept only as local ignored archives. Test fixtures are under `fixtures/repos/`, with fake LSP servers in `fixtures/lsp/`.
 
 ## Build, Test, and Development Commands
 
@@ -27,4 +27,4 @@ Recent history uses short imperative commits such as `Fix LSP command detection`
 
 ## Agent-Specific Instructions
 
-Inspect real repository files before editing. Preserve standalone operation: no bundled `ast-grep`, no bundled language servers, no automatic dependency installation, and explicit fallback reporting when text search is used.
+Inspect real repository files before editing. Preserve standalone cross-client operation: no bundled `ast-grep`, no bundled language servers, no automatic dependency installation, and explicit fallback reporting when text search materially reduces coverage or confidence.

@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "code-intel": {
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/mcp/code-intel-server/index.js"
+      ],
+      "env": {}
+    }
+  }
+}

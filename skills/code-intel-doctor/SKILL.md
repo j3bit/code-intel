@@ -9,7 +9,7 @@ Run when code-intel capability seems missing, stale, or degraded.
 
 ```sh
 doctor-code-intel --repo <repo-root>
-# From this plugin repository checkout, the equivalent fallback is:
+# From a code-intel plugin checkout, the equivalent fallback is:
 node scripts/doctor-code-intel.js --repo <repo-root>
 ```
 
@@ -24,4 +24,4 @@ Doctor reports:
 
 It never installs dependencies automatically.
 
-Read `references/fallback-policy.md` when interpreting degraded capabilities.
+Read `../../references/fallback-policy.md` when interpreting degraded capabilities.

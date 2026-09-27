@@ -1,0 +1,14 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "code-intel": {
+      "type": "local",
+      "command": [
+        "node",
+        "{env:CODE_INTEL_PLUGIN_ROOT}/mcp/code-intel-server/index.js"
+      ],
+      "enabled": true,
+      "environment": {}
+    }
+  }
+}

@@ -34,6 +34,6 @@ Use `ast-grep` for AST search. Do not use the Linux-conflicting shorthand comman
 
 ## References
 
-- Read `references/routing-policy.md` when route order or stale-profile behavior matters.
-- Read `references/fallback-policy.md` when reporting degraded capability.
-- Read `references/mcp-tool-contract.md` before relying on preview, audit, or LSP tool output shapes.
+- Read `../../references/routing-policy.md` when route order or stale-profile behavior matters.
+- Read `../../references/fallback-policy.md` when reporting degraded capability.
+- Read `../../references/mcp-tool-contract.md` before relying on preview, audit, or LSP tool output shapes.

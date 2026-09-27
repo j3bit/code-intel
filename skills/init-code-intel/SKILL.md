@@ -9,7 +9,7 @@ Run when a repository needs a fresh code-intel profile.
 
 ```sh
 init-code-intel --repo <repo-root>
-# From this plugin repository checkout, the equivalent fallback is:
+# From a code-intel plugin checkout, the equivalent fallback is:
 node scripts/init-code-intel.js --repo <repo-root>
 ```
 
@@ -21,4 +21,4 @@ Outputs:
 
 The profile is a cache and routing hint. Live failures override stale profile data.
 
-Read `settings/schema.json` and `settings/defaults.json` when changing language coverage, LSP commands, PATH extras, or ast-grep config behavior.
+Read `../../settings/schema.json` and `../../settings/defaults.json` when changing language coverage, LSP commands, PATH extras, or ast-grep config behavior.
